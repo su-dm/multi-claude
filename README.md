@@ -1,16 +1,18 @@
 # multi-claude
 
+<img width="1629" height="543" alt="banner" src="https://github.com/user-attachments/assets/6d6c3c91-bfdf-41e4-969b-1343fb81955b" />
+
 **Manage a fleet of Claude Code agents from one terminal.**
 
 Managing my claude-code sessions was getting annoying.
 I wanted a single dashboard where I can switch between them while monitoring the status of my other agents.
 This is a minimal tmux-backed claude-code manager with tmux/vim style key-binds.
 There's other projects that attempt to do something similar, 
-for example https://github.com/manaflow-ai/cmux is really nice but only for MacOS and requires a shell installation.
+for example [cmux](https://github.com/manaflow-ai/cmux is) really nice but only for MacOS and requires a shell installation.
 Multi-Claude works within your existing shell and on Linux. If you have any feature requests let me know.
 
 
-<video src="https://github.com/su-dm/multi-claude/multi-claude-demo.webm" controls max-width="100%"></video>
+[multi-claude-demo.webm](https://github.com/user-attachments/assets/ac0cc83b-c512-4c75-b80b-b0b0d99940af)
 
 
 ## Key features
@@ -34,7 +36,7 @@ Multi-Claude works within your existing shell and on Linux. If you have any feat
 - **Agent knowledge capture** — `S` asks an agent to condense the session's
   discoveries into a reusable skill; `H` asks it to write `HANDOFF.md` so the
   next session picks up where it left off.
-- **Zero heavy deps** — stdlib Python + tmux. No Electron, no pip installs.
+- **Zero heavy deps** — stdlib Python + tmux. No pip installs.
 
 ## Install
 
@@ -109,8 +111,7 @@ heavy the agents themselves are.
 
 ## Compatibility
 
-Each release is verified against a specific Claude Code series — see
-[CHANGELOG.md](CHANGELOG.md). `multi-claude --version` prints the verified
+Each release is verified against a specific Claude Code series. `multi-claude --version` prints the verified
 series, and the dashboard warns if your installed Claude Code differs. Status
 heuristics live in one file (`multi_claude/status.py`) with fixtures, so
 adapting to a UI change is a small, tested edit.
