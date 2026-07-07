@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 
-from .config import Config, DASH_SESSION, SIDEBAR_WIDTH, WORK_SESSION
+from .config import Config, DASH_SESSION, WORK_SESSION
 from .registry import Instance, Registry
 from .status import Status, StatusInfo, classify
 from .tmux import Pane, Tmux, TmuxError
@@ -226,7 +227,7 @@ class InstanceManager:
             "-welcome", self.welcome_cmd()
         )
         self.tmux.join_pane_right(welcome_id, sidebar.pane_id)
-        self.tmux.resize_pane_width(sidebar.pane_id, SIDEBAR_WIDTH)
+        self.tmux.resize_pane_width(sidebar.pane_id, self.config.sidebar_width)
 
     def display_welcome(self) -> None:
         """Put the welcome pane (back) into the viewer slot."""
@@ -244,6 +245,26 @@ class InstanceManager:
             old = self.registry.get_by_pane(viewer.pane_id)
             if old:
                 self.tmux.rename_window_of_pane(viewer.pane_id, old.name)
+
+    def shutdown_dashboard(self) -> None:
+        """Graceful quit (C-c in the sidebar/welcome pane): park the displayed
+        instance back to its work window so it survives, then kill the
+        dashboard session. Instances keep running in WORK_SESSION;
+        `multi-claude` reopens the dashboard.
+
+        Runs from a process whose pane lives inside mc-dash, so ignore the
+        SIGHUP that killing the session sends us — we want to finish cleanly,
+        not die mid-teardown."""
+        self.stop_polling()
+        try:
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        except (OSError, ValueError):
+            pass  # not the main thread / unsupported — teardown still works
+        try:
+            self.display_welcome()
+        except TmuxError:
+            pass
+        self.tmux.kill_dash_session()
 
     def select(self, which: str) -> None:
         """CLI hook for tmux bindings: `select 3`, `select next`, `select NAME`.

@@ -170,6 +170,21 @@ echo '{"session_id":"smoke-session","model":{"id":"claude-sonnet-5","display_nam
 [ -f "$DATA_DIR/costs/smoke-session.json" ] || fail "cost file not written"
 grep -q '9.87' "$DATA_DIR/costs/smoke-session.json" || fail "cost value not stored"
 
+echo "6g. C-c quits the dashboard gracefully (agents keep running)"
+SIDEBAR_PANE=$(T list-panes -t mc-dash:dash -F '#{pane_id} #{pane_start_command}' \
+  | grep "multi_claude sidebar" | cut -d' ' -f1)
+MC select smoke >/dev/null   # a displayed instance pane must survive the quit
+T send-keys -t "$SIDEBAR_PANE" C-c
+deadline=$((SECONDS + 10))
+while T list-sessions -F '#{session_name}' 2>/dev/null | grep -qx "mc-dash"; do
+  ((SECONDS < deadline)) || fail "mc-dash still alive after C-c"
+  sleep 0.5
+done
+T list-panes -a -F '#{window_name}' | grep -qx "smoke" || fail "smoke pane died with the dashboard"
+wait_status smoke "idle"
+MC bootstrap >/dev/null    # reopen for the remaining steps
+MC select smoke >/dev/null
+
 MC send smoke "exit"
 wait_status smoke "exited"
 

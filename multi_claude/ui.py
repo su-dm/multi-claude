@@ -15,10 +15,11 @@ from __future__ import annotations
 import curses
 import os
 import shlex
+import shutil
+import textwrap
 import time
 
 from . import CLAUDE_CODE_VERIFIED
-from .config import SIDEBAR_WIDTH
 from .manager import InstanceManager, Snapshot
 from .status import Status
 from .tmux import TmuxError
@@ -33,6 +34,7 @@ HELP_LINES = [
     ("a / M-a", "jump to agent needing input"),
     ("M-z", "zoom claude full screen"),
     ("v", "toggle compact/expanded view"),
+    ("< / >", "narrow / widen the sidebar (persisted)"),
     ("n", "new instance (Tab completes;"),
     ("", "  offers git worktree isolation)"),
     ("i", "send a line w/o focusing"),
@@ -48,8 +50,25 @@ HELP_LINES = [
     ("S", "agent: condense work to skill"),
     ("H", "agent: write HANDOFF.md"),
     ("q / C-q", "detach (all keeps running)"),
-    ("?", "toggle this help"),
+    ("C-c", "quit dashboard (agents keep running)"),
+    ("?", "this help (q closes)"),
 ]
+
+
+def help_text() -> str:
+    """The key reference as plain text for the tmux popup renderer."""
+    out = ["", "  multi-claude keys", "  " + "─" * 17, ""]
+    for key, desc in HELP_LINES:
+        out.append(f"  {key:<12} {desc}")
+    out += ["", "  reopen a closed dashboard with: multi-claude", ""]
+    return "\n".join(out)
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Wrap text to width, never dropping content (long words break)."""
+    return textwrap.wrap(
+        text, max(1, width), break_long_words=True, break_on_hyphens=False
+    )
 
 ICONS = {
     Status.WORKING: "◐",
@@ -130,17 +149,24 @@ class Sidebar:
 
     # -- main loop ---------------------------------------------------------------
 
-    def run(self) -> None:
-        curses.curs_set(0)
-        self.scr.timeout(150)
-        series = self.manager.config.claude_code_series()
-        if series and series != CLAUDE_CODE_VERIFIED:
-            self.flash(
-                f"claude code {series}.x untested (verified {CLAUDE_CODE_VERIFIED}.x)",
-                seconds=10,
-            )
-        self.manager.start_polling()
+    def run(self) -> bool:
+        """Event loop. Returns True when the user hit C-c: the caller must
+        then shut the whole dashboard down (after curses has been torn down,
+        so the terminal is restored first).
+
+        The try covers startup too — claude_code_series() forks `claude
+        --version`, which can take seconds, and a C-c landing there must
+        still quit gracefully rather than leave a dead frozen pane."""
         try:
+            curses.curs_set(0)
+            self.scr.timeout(150)
+            series = self.manager.config.claude_code_series()
+            if series and series != CLAUDE_CODE_VERIFIED:
+                self.flash(
+                    f"claude code {series}.x untested (verified {CLAUDE_CODE_VERIFIED}.x)",
+                    seconds=10,
+                )
+            self.manager.start_polling()
             while True:
                 self._handle_attention()
                 self.draw()
@@ -149,6 +175,10 @@ class Sidebar:
                 except curses.error:
                     continue  # timeout tick; loop redraws with fresh snapshots
                 self.handle_key(key)
+        except KeyboardInterrupt:
+            # C-c anywhere in the sidebar (including inside prompt/pick/
+            # confirm): graceful quit.
+            return True
         finally:
             self.manager.stop_polling()
 
@@ -163,13 +193,15 @@ class Sidebar:
         self.message_until = time.monotonic() + seconds
 
     def _enforce_width(self) -> None:
-        """Keep the sidebar pane at its fixed width after terminal resizes."""
+        """Keep the sidebar pane at its configured width after terminal
+        resizes (the width itself is adjustable with < / >)."""
         pane = os.environ.get("TMUX_PANE")
         if not pane:
             return
+        want = self.manager.config.sidebar_width
         _, w = self.scr.getmaxyx()
-        if w != SIDEBAR_WIDTH and not self.manager.tmux.dash_zoomed():
-            self.manager.tmux.resize_pane_width(pane, SIDEBAR_WIDTH)
+        if w != want and not self.manager.tmux.dash_zoomed():
+            self.manager.tmux.resize_pane_width(pane, want)
 
     # -- drawing -----------------------------------------------------------------
 
@@ -183,8 +215,10 @@ class Sidebar:
             self._draw_help(h, w)
             self.scr.refresh()
             return
-        self._draw_list(snaps, 1, h - 2, w)
-        self._draw_footer(h - 1, w)
+        footer, footer_attr = self._footer_lines(w)
+        self._draw_list(snaps, 1, h - 1 - len(footer), w)
+        for i, line in enumerate(footer):
+            self._addstr(h - len(footer) + i, 0, f" {line}"[: w - 1], footer_attr)
         self.scr.refresh()
 
     def _rows_per_item(self) -> int:
@@ -251,22 +285,33 @@ class Sidebar:
             activity = sess.activity or sess.title
         self._addstr(y + 3, 4, activity[: width - 5], self.attr["accent"])
 
-    def _draw_footer(self, y: int, w: int) -> None:
+    def _footer_lines(self, w: int) -> tuple[list[str], int]:
+        """Footer rows (bottom of the sidebar): a flash message wraps over up
+        to 4 rows so it's never cut off; otherwise the standing hint."""
         if time.monotonic() < self.message_until and self.message:
-            self._addstr(y, 0, f" {self.message} "[: w], self.attr["accent"] | curses.A_BOLD)
-            return
-        self._addstr(y, 0, " ↵ open · n new · ? help"[: w], self.attr["dim"])
+            lines = _wrap(self.message, w - 2)[:4] or [""]
+            return lines, self.attr["accent"] | curses.A_BOLD
+        return ["↵ open · n new · ? help"], self.attr["dim"]
+
+    def _help_rows(self, w: int) -> list[tuple[str, str]]:
+        """HELP_LINES with descriptions wrapped to the current width, so the
+        fallback (non-popup) help never truncates."""
+        rows: list[tuple[str, str]] = []
+        for key, desc in HELP_LINES:
+            wrapped = _wrap(desc, max(6, w - 15)) or [""]
+            rows.append((key, wrapped[0]))
+            rows.extend(("", cont) for cont in wrapped[1:])
+        return rows
 
     def _draw_help(self, h: int, w: int) -> None:
+        rows = self._help_rows(w)
         visible = h - 3
-        self.help_top = max(0, min(self.help_top, len(HELP_LINES) - visible))
-        for row, (key, desc) in enumerate(
-            HELP_LINES[self.help_top : self.help_top + visible]
-        ):
+        self.help_top = max(0, min(self.help_top, len(rows) - visible))
+        for row, (key, desc) in enumerate(rows[self.help_top : self.help_top + visible]):
             y = 2 + row
             self._addstr(y, 1, f"{key:<12}"[:13], curses.A_BOLD)
-            self._addstr(y, 14, desc[: w - 15], self.attr["dim"])
-        more = len(HELP_LINES) - self.help_top - visible
+            self._addstr(y, 14, desc, self.attr["dim"])
+        more = len(rows) - self.help_top - visible
         hint = f"j/k scroll ({more} more) · any key closes" if more > 0 else "any key closes"
         self._addstr(h - 1, 0, f" {hint}"[: w - 1], self.attr["accent"])
 
@@ -291,7 +336,9 @@ class Sidebar:
             if key == "q":
                 self.manager.tmux.detach_dashboard_clients()
             elif key == "?":
-                self.show_help = True
+                self.action_help()
+            elif key in ("<", ">"):
+                self.action_resize(2 if key == ">" else -2)
             elif key == "j":
                 self.selected = min(n - 1, self.selected + 1) if n else 0
             elif key == "k":
@@ -362,6 +409,29 @@ class Sidebar:
             self.flash("no instances — n creates one")
             return None
         return snaps[self.selected]
+
+    def action_help(self) -> None:
+        """Key reference in a centered tmux popup (scrolls via less); falls
+        back to the in-sidebar overlay on tmux < 3.2 (no display-popup)."""
+        if not self.manager.tmux.supports_popup():
+            self.show_help = True
+            return
+        cmd = f"{self.manager.config.mc_command()} help-popup"
+        if shutil.which("less"):
+            cmd += " | less -R -Ps" + shlex.quote("j/k scroll · q closes")
+        lines = help_text().count("\n") + 2
+        ww, wh = self.manager.tmux.dash_size()
+        width = max(30, min(56, ww - 4)) if ww else 56
+        height = max(10, min(lines, wh - 2)) if wh else lines
+        self.manager.tmux.popup(cmd, width=str(width), height=str(height))
+
+    def action_resize(self, delta: int) -> None:
+        """Adjust + persist the sidebar width (< narrower, > wider)."""
+        cfg = self.manager.config
+        cfg.sidebar_width = max(24, min(100, cfg.sidebar_width + delta))
+        cfg.save_setting("sidebar_width", cfg.sidebar_width)
+        self._enforce_width()
+        self.flash(f"sidebar width {cfg.sidebar_width}")
 
     def action_display(self, snaps: list[Snapshot]) -> None:
         snap = self._current(snaps)
@@ -664,12 +734,21 @@ class Sidebar:
             while True:
                 self.scr.erase()
                 _, w = self.scr.getmaxyx()
-                self._addstr(0, 0, f" {title} ".ljust(w), curses.A_BOLD | curses.A_REVERSE)
+                y = 0
+                for line in _wrap(title, w - 2) or [title]:
+                    self._addstr(y, 0, f" {line} ".ljust(w), curses.A_BOLD | curses.A_REVERSE)
+                    y += 1
+                y += 1
                 for i, (label, _) in enumerate(options):
                     marker = "❯ " if i == sel else "  "
                     attr = curses.A_BOLD if i == sel else self.attr["dim"]
-                    self._addstr(2 + i, 1, (marker + label)[: w - 2], attr)
-                self._addstr(3 + len(options), 1, "↵ open · ESC cancel", self.attr["dim"])
+                    lines = _wrap(label, w - 4) or [label]
+                    self._addstr(y, 1, marker + lines[0], attr)
+                    for cont in lines[1:]:
+                        y += 1
+                        self._addstr(y, 3, cont, attr)
+                    y += 1
+                self._addstr(y + 1, 1, "↵ accept · ESC cancel", self.attr["dim"])
                 self.scr.refresh()
                 try:
                     key = self.scr.get_wch()
@@ -696,8 +775,11 @@ class Sidebar:
 
     def confirm(self, question: str) -> bool:
         h, w = self.scr.getmaxyx()
-        self._addstr(h - 1, 0, " " * (w - 1))
-        self._addstr(h - 1, 0, f" {question} "[: w - 1], self.attr["help"] | curses.A_BOLD)
+        lines = _wrap(question, w - 2) or [question]
+        for i, line in enumerate(lines):
+            y = h - len(lines) + i
+            self._addstr(y, 0, " " * (w - 1))
+            self._addstr(y, 0, f" {line}", self.attr["help"] | curses.A_BOLD)
         self.scr.refresh()
         self.scr.timeout(-1)
         try:
@@ -760,4 +842,12 @@ def _abbrev_path(path: str) -> str:
 
 
 def run_sidebar(manager: InstanceManager) -> None:
-    curses.wrapper(lambda scr: Sidebar(scr, manager).run())
+    try:
+        quit_all = curses.wrapper(lambda scr: Sidebar(scr, manager).run())
+    except KeyboardInterrupt:
+        # C-c in the slivers outside Sidebar.run's own handler (curses
+        # setup/teardown): same graceful quit.
+        quit_all = True
+    if quit_all:
+        # Tear the dashboard down AFTER curses restored the terminal.
+        manager.shutdown_dashboard()

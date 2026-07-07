@@ -103,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_select.add_argument("which", help="instance number, name, 'next' or 'prev'")
     sub.add_parser("sidebar", help=argparse.SUPPRESS)
     sub.add_parser("welcome", help=argparse.SUPPRESS)
+    sub.add_parser("help-popup", help=argparse.SUPPRESS)
 
     return parser
 
@@ -120,11 +121,40 @@ def run_welcome() -> None:
         "  From anywhere in the dashboard:\n"
         "    Alt-1..9  switch instance   Alt-o  next instance\n"
         "    Alt-h/l   move focus        Alt-z  zoom this pane\n"
-        "    C-q       detach (everything keeps running)\n",
+        "    C-q       detach            C-c    quit dashboard\n"
+        "              (either way, agents keep running)\n",
         flush=True,
     )
     while True:  # keep the pane alive; content is static
         time.sleep(3600)
+
+
+def run_help_popup() -> None:
+    """Render the key reference inside a tmux popup. Normally piped into
+    `less` (which scrolls and holds the popup open); when stdout is the
+    popup's tty directly (no less), wait for a keypress ourselves."""
+    from .ui import help_text
+
+    print(help_text(), flush=True)
+    if not sys.stdout.isatty():
+        return
+    print("  any key closes", flush=True)
+    try:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        try:
+            sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except (ImportError, OSError):
+        try:
+            input()
+        except EOFError:
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -147,7 +177,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd is None:
             manager.bootstrap_dashboard()
-            return manager.tmux.attach_dashboard()
+            rc = manager.tmux.attach_dashboard()
+            # A C-c quit kills the session under the client, which then exits
+            # nonzero — that's a clean shutdown, not an error.
+            return 0 if rc != 0 and not manager.tmux.dashboard_exists() else rc
         if args.cmd == "bootstrap":
             manager.bootstrap_dashboard()
             print("dashboard ready (multi-claude to attach)")
@@ -162,7 +195,15 @@ def main(argv: list[str] | None = None) -> int:
             run_sidebar(manager)
             return 0
         if args.cmd == "welcome":
-            run_welcome()
+            try:
+                run_welcome()
+            except KeyboardInterrupt:
+                # C-c with the welcome pane focused: same graceful quit as
+                # C-c in the sidebar (a dead placeholder pane helps nobody).
+                manager.shutdown_dashboard()
+            return 0
+        if args.cmd == "help-popup":
+            run_help_popup()
             return 0
         if args.cmd == "select":
             manager.select(args.which)
@@ -196,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "attach":
             manager.bootstrap_dashboard()
             manager.display(args.name, focus=True)
-            return manager.tmux.attach_dashboard()
+            rc = manager.tmux.attach_dashboard()
+            return 0 if rc != 0 and not manager.tmux.dashboard_exists() else rc
         if args.cmd == "send":
             manager.send_text(args.name, args.text)
             return 0
@@ -255,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, KeyError, TmuxError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        return 130
     return 0
 
 

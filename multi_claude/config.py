@@ -22,7 +22,7 @@ ENV_PREFIX = "MULTI_CLAUDE_"
 DASH_SESSION = "mc-dash"     # the dashboard: sidebar pane + viewer pane
 DASH_WINDOW = "dash"
 WORK_SESSION = "mc-work"     # parking lot: one window per undisplayed instance
-SIDEBAR_WIDTH = 34
+SIDEBAR_WIDTH = 34           # default; runtime-adjustable with < / > (persisted)
 
 
 def _env(name: str, default: str) -> str:
@@ -60,6 +60,11 @@ class Config:
     # overridable so tests can fabricate transcripts.
     claude_home: Path = field(
         default_factory=lambda: Path(_env("CLAUDE_HOME", os.path.expanduser("~/.claude")))
+    )
+    # Sidebar pane width (columns); < / > adjust it at runtime and persist
+    # the choice in settings.json.
+    sidebar_width: int = field(
+        default_factory=lambda: int(_env("SIDEBAR_WIDTH", str(SIDEBAR_WIDTH)))
     )
 
     @property
@@ -124,6 +129,11 @@ class Config:
             return
         if "MULTI_CLAUDE_NOTIFY" not in os.environ and "notify" in data:
             self.notify = bool(data["notify"])
+        if "MULTI_CLAUDE_SIDEBAR_WIDTH" not in os.environ and "sidebar_width" in data:
+            try:
+                self.sidebar_width = max(20, min(100, int(data["sidebar_width"])))
+            except (TypeError, ValueError):
+                pass
 
     def save_setting(self, key: str, value) -> None:
         self.ensure_dirs()

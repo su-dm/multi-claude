@@ -7,7 +7,7 @@ screen heuristics + change detection; token usage from Claude Code's
 transcript files. Instances survive dashboard restarts — tmux owns them.
 """
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 # The Claude Code release series this version's status heuristics and
 # transcript parsing were verified against (see CHANGELOG.md). A different

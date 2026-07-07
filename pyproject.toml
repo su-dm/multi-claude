@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multi-claude"
-version = "0.5.1"
+version = "0.6.0"
 description = "Terminal dashboard for managing multiple Claude Code instances (tmux-backed)"
 readme = "README.md"
 requires-python = ">=3.10"

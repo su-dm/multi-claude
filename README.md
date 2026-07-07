@@ -1,43 +1,31 @@
 # multi-claude
 
-**Run a fleet of Claude Code agents from one terminal.**
+**Manage a fleet of Claude Code agents from one terminal.**
 
-A tmux-backed dashboard for Linux: a sidebar shows every agent's live status,
-context size, cost, and what it's thinking — the selected agent's *real,
-fully interactive* session sits right next to it. Type into Claude while
-watching the rest of the fleet.
+Managing my claude-code sessions was getting annoying.
+I wanted a single dashboard where I can switch between them while monitoring the status of my other agents.
+This is a minimal tmux-backed claude-code manager with tmux/vim style key-binds.
+There's other projects that attempt to do something similar, 
+for example https://github.com/manaflow-ai/cmux is really nice but only for MacOS and requires a shell installation.
+Multi-Claude works within your existing shell and on Linux. If you have any feature requests let me know.
 
-```
- multi-claude                     │ ● Done! All 34 tests pass. Next I'll
- ❯ ◐ 1 ✦backend             87k   │   wire up the retry logic.
-     ~/code/backend · working     │
-     sonnet-5 · $1.84 · main +3   │ ╭──────────────────────────────────╮
-     ∴ the retry loop double-fires│ │ > fix the flaky websocket test█   │
-   ● 2 frontend             31k   │ ╰──────────────────────────────────╯
-     ~/code/frontend · idle       │   ? for shortcuts
-   ◆ 3 infra               156k   │
-     ~/code/infra · help          │        ← the actual Claude session,
- ↵ open · n new · ? help          │           not a preview
-```
+
+<video src="https://github.com/su-dm/multi-claude/multi-claude-demo.webm" controls max-width="100%"></video>
+
 
 ## Key features
 
 - **Live side-by-side** — the pane next to the sidebar *is* the agent's tmux
-  pane (perfect fidelity, mouse, scrollback). `Alt-1..9` switches agents from
+  pane. Scroll supported. `Alt-1..9` switches agents from
   anywhere; `Alt-a` jumps to whichever agent needs your input.
 - **Three-state status** — working ◐ / idle ● / **help** ◆ (permission
   prompt, plan approval, question), with desktop notifications when an agent
   starts waiting on you.
-- **Deep session insight** — per agent: context tokens (yellow at 150k, red
-  at 180k), model, session cost, git branch + dirty count, and a one-line
-  "current thought" read live from the agent's own transcript.
-- **Exact costs (opt-in)** — `multi-claude install-statusline` captures the
-  cost figure Claude Code itself computes; without it you get a pricing-table
-  estimate marked `~`.
-- **Survives everything** — agents live on a dedicated tmux server, not in
-  the UI. Dashboard crash: nothing happens. Reboot:
-  `multi-claude resume-all` relaunches every agent *continuing its exact
-  conversation* (`--resume <session-id>`).
+- **Session metrics** — per agent: cost, context tokens (yellow at 150k, red
+  at 180k), model, session cost, git branch + dirty count, and a 
+  "current thought" summarizing agent's focus.
+- **Revivable sessions** — agents live on a dedicated tmux server, not in
+  the UI. Dashboard crash: nothing happens. Reboot and it resumes where you left off.
 - **Parallel agents on one repo** — spawn agents on isolated **git
   worktrees** (`<repo>.worktrees/<branch>`, browsable side by side); merge
   their branches normally when done.
@@ -70,6 +58,7 @@ multi-claude`). The installer prints the full list; nothing else is touched.
 | `Alt-h` / `Alt-l` | focus sidebar / Claude |
 | `Alt-1..9` · `Alt-o` · `Alt-a` | switch agent · next · next-needing-input |
 | `Alt-z` / `C-q` | zoom pane / detach (everything keeps running) |
+| `C-c` (in sidebar) | quit the dashboard — agents keep running; `multi-claude` reopens |
 
 | Sidebar | |
 | --- | --- |
@@ -81,7 +70,8 @@ multi-claude`). The installer prints the full list; nothing else is touched.
 | `R` / `C` | restart fresh / **resume conversation** |
 | `i` / `x` / `r` | send one line / kill / rename |
 | `c` / `S` / `H` | open claude configs · condense-to-skill · write HANDOFF.md |
-| `?` | full key reference |
+| `<` / `>` | narrow / widen the sidebar (persisted) |
+| `?` | full key reference (popup; `j`/`k` scroll, `q` closes) |
 
 ```bash
 multi-claude new ~/code/api -n api            # spawn without the UI
@@ -96,7 +86,8 @@ multi-claude stats                            # multi-claude's own CPU/RAM cost
 
 Configuration via `MULTI_CLAUDE_*` env vars: `SOCKET`, `DATA_DIR`,
 `CLAUDE_CMD`, `CLAUDE_HOME`, `POLL_INTERVAL` (default 1s), `NOTIFY` (=0
-disables bell/notify-send).
+disables bell/notify-send), `SIDEBAR_WIDTH` (default 34; `<`/`>` adjust it
+live).
 
 ## How it works
 
@@ -132,6 +123,3 @@ make smoke   # integration: real tmux + a fake-claude stand-in (no API use)
 make check   # both
 ```
 
-`JOURNAL.md` is the running engineering log (decisions, measured numbers,
-tmux gotchas). Contributions should keep `make check` green and update
-CHANGELOG.md with the Claude Code series they verified against.

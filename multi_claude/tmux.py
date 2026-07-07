@@ -19,11 +19,20 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 
-from .config import Config, DASH_SESSION, DASH_WINDOW, SIDEBAR_WIDTH, WORK_SESSION
+import re
+
+from .config import Config, DASH_SESSION, DASH_WINDOW, WORK_SESSION
 
 
 class TmuxError(RuntimeError):
     pass
+
+
+def parse_tmux_version(text: str) -> tuple[int, int]:
+    """(major, minor) from `tmux -V` output ("tmux 3.4", "tmux next-3.6",
+    "tmux 3.3a"); (0, 0) when unparseable."""
+    m = re.search(r"(\d+)\.(\d+)", text)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
 @dataclass
@@ -111,6 +120,33 @@ class Tmux:
 
     def dash_panes(self) -> list[Pane]:
         return [p for p in self.list_panes() if p.session == DASH_SESSION]
+
+    def version(self) -> tuple[int, int]:
+        """tmux binary version; cached — invoked at most once per process."""
+        if not hasattr(self, "_version"):
+            try:
+                out = subprocess.run(
+                    ["tmux", "-V"], capture_output=True, text=True, timeout=5
+                ).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                out = ""
+            self._version = parse_tmux_version(out)
+        return self._version
+
+    def supports_popup(self) -> bool:
+        return self.version() >= (3, 2)
+
+    def dash_size(self) -> tuple[int, int]:
+        """(width, height) of the dashboard window; (0, 0) if unavailable."""
+        proc = self._run(
+            "display-message", "-p", "-t", f"={DASH_SESSION}:{DASH_WINDOW}",
+            "#{window_width} #{window_height}", check=False,
+        )
+        try:
+            w, h = proc.stdout.split()
+            return int(w), int(h)
+        except ValueError:
+            return (0, 0)
 
     # -- instance panes -----------------------------------------------------
 
@@ -215,7 +251,7 @@ class Tmux:
         )
         self._run(
             "resize-pane", "-t", f"={DASH_SESSION}:{DASH_WINDOW}.0",
-            "-x", str(SIDEBAR_WIDTH), check=False,
+            "-x", str(self.config.sidebar_width), check=False,
         )
 
     def respawn_dead_dash_panes(self, sidebar_cmd: str, welcome_cmd: str) -> None:
@@ -241,6 +277,12 @@ class Tmux:
 
     def detach_dashboard_clients(self) -> None:
         self._run("detach-client", "-s", f"={DASH_SESSION}", check=False)
+
+    def kill_dash_session(self) -> None:
+        """Tear down the dashboard session (graceful quit). Callers must park
+        any displayed instance pane back to WORK_SESSION first — panes still
+        inside mc-dash die with it."""
+        self._run("kill-session", "-t", f"={DASH_SESSION}", check=False)
 
     def popup(self, shell_cmd: str, width: str = "85%", height: str = "85%") -> None:
         """Run a command in a tmux popup over the dashboard (tmux >= 3.2).
