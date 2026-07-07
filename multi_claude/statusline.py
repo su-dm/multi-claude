@@ -118,6 +118,32 @@ def install(config: Config) -> str:
     return note
 
 
+def uninstall(config: Config) -> str:
+    """Remove our hook from ~/.claude/settings.json, restoring whatever
+    statusline command it replaced (saved in the chain file)."""
+    settings_path = config.claude_home / "settings.json"
+    try:
+        settings = json.loads(settings_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "nothing to do (no readable settings.json)"
+    current = (settings.get("statusLine") or {}).get("command", "")
+    if "multi_claude statusline" not in current:
+        return "nothing to do (our hook is not installed)"
+    chain = chain_path(config)
+    previous = chain.read_text().strip() if chain.exists() else ""
+    if previous:
+        settings["statusLine"] = {"type": "command", "command": previous}
+        note = f"restored your previous statusline: {previous!r}"
+    else:
+        settings.pop("statusLine", None)
+        note = "statusline hook removed"
+    tmp = settings_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(settings, indent=2) + "\n")
+    os.replace(tmp, settings_path)
+    chain.unlink(missing_ok=True)
+    return note
+
+
 def run_hook(config: Config) -> int:
     print(record_and_render(config, sys.stdin.read()))
     return 0

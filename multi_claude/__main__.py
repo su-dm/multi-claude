@@ -88,7 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "install-statusline",
         help="capture Claude Code's exact per-session cost via its statusline "
-        "hook (replaces pricing estimates; preserves an existing statusline)",
+        "hook (wired by install.sh; preserves an existing statusline)",
+    )
+    sub.add_parser(
+        "uninstall-statusline",
+        help="remove the cost hook from ~/.claude/settings.json, restoring "
+        "any previous statusline (costs fall back to estimates)",
     )
     sub.add_parser("statusline", help=argparse.SUPPRESS)  # the hook itself
 
@@ -293,6 +298,12 @@ def main(argv: list[str] | None = None) -> int:
             note = install(manager.config)
             print("statusline hook installed " + note)
             print("new/restarted claude sessions will report exact costs")
+            return 0
+        if args.cmd == "uninstall-statusline":
+            from .statusline import uninstall
+
+            print(uninstall(manager.config))
+            print("dashboard costs fall back to pricing estimates (~ prefix)")
             return 0
     except (ValueError, KeyError, TmuxError) as exc:
         print(f"error: {exc}", file=sys.stderr)

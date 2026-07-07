@@ -28,6 +28,17 @@ for skill in condense-to-skill handoff; do
   fi
 done
 
+# Exact cost reporting: wire Claude Code's statusline hook into
+# ~/.claude/settings.json. Safe by design: an existing statusline keeps
+# rendering (chained), and if the hook is ever removed the dashboard just
+# falls back to pricing estimates. Revert: multi-claude uninstall-statusline
+# Skip with: ./install.sh --no-statusline  (or MULTI_CLAUDE_NO_STATUSLINE=1)
+if [ "${1:-}" != "--no-statusline" ] && [ "${MULTI_CLAUDE_NO_STATUSLINE:-0}" != "1" ]; then
+  ./bin/multi-claude install-statusline
+else
+  printf 'skipped statusline hook (exact costs); opt in later: multi-claude install-statusline\n'
+fi
+
 DATA_DIR="${MULTI_CLAUDE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/multi-claude}"
 cat <<EOF
 
@@ -35,13 +46,15 @@ multi-claude stores its state here:
   $DATA_DIR
     instances.json    instance registry (dirs, launch args, session ids)
     tmux.conf         generated config for the dedicated tmux server
-    costs/            per-session costs captured from Claude Code (optional)
+    costs/            per-session costs captured from Claude Code
   tmux server socket: tmux -L multi-claude   (instances live here, not in
                       the dashboard — they survive dashboard restarts)
 Also: ~/.claude/skills/{condense-to-skill,handoff} (companion skills for
-the S/H shortcuts; only copied if absent). ~/.claude/settings.json is
-touched only IF you opt in: multi-claude install-statusline (exact costs).
-Uninstall: make uninstall; rm -rf "$DATA_DIR"; tmux -L multi-claude kill-server
+the S/H shortcuts; only copied if absent), and a statusLine hook in
+~/.claude/settings.json for exact cost reporting (any statusline you already
+had keeps rendering; revert anytime: multi-claude uninstall-statusline).
+Uninstall: multi-claude uninstall-statusline; make uninstall;
+rm -rf "$DATA_DIR"; tmux -L multi-claude kill-server
 
 done. run: multi-claude
 EOF

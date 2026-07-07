@@ -51,7 +51,11 @@ multi-claude        # open the dashboard
 
 State lives in `~/.local/share/multi-claude/` (registry, generated tmux
 conf, captured costs) plus the dedicated tmux server (`tmux -L
-multi-claude`). The installer prints the full list; nothing else is touched.
+multi-claude`). The installer also wires a statusLine hook into
+`~/.claude/settings.json` so agent costs are Claude Code's own exact numbers
+— any statusline you already had keeps rendering, and
+`multi-claude uninstall-statusline` (or `./install.sh --no-statusline`)
+reverts it. The installer prints the full list; nothing else is touched.
 
 ## Usage
 
@@ -82,7 +86,9 @@ multi-claude ls                               # names, status, tokens, dirs
 multi-claude send api "run the tests"         # type into an agent
 multi-claude resume-all                       # after a reboot: continue all
 multi-claude archive api && multi-claude unarchive api
-multi-claude install-statusline               # exact cost reporting (opt-in)
+multi-claude uninstall-statusline             # remove the exact-cost hook
+                                              # (install.sh wires it; costs
+                                              #  fall back to ~ estimates)
 multi-claude stats                            # multi-claude's own CPU/RAM cost
 ```
 
@@ -103,7 +109,7 @@ Status detection is two-layered: marker matching on the visible screen
 screen-change fallback so a future Claude Code UI degrades gracefully instead
 of breaking. Tokens, model, cost, and the "current thought" line come from
 Claude Code's own transcript files (`~/.claude/projects/…`); exact costs come
-from its statusline hook when installed.
+from its statusline hook (wired at install; estimates marked `~` otherwise).
 
 Overhead is deliberately tiny: **~40 MiB RAM and <1% of one core** for the
 whole dashboard (measured; see `multi-claude stats`), independent of how
