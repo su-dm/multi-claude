@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from multi_claude.config import Config
+from multi_claude.config import Config, DASH_SESSION, WORK_SESSION
 from multi_claude.tmux import Tmux
 
 
@@ -29,38 +29,43 @@ class TmuxArgvTest(unittest.TestCase):
         self.assertEqual(argv[3], "-f")
         self.assertTrue(argv[4].endswith("tmux.conf"))
 
-    def test_attach_argv_uses_exact_session_match(self):
-        argv = self.tmux.attach_argv("proj")
-        self.assertEqual(argv[-3:], ["attach-session", "-t", "=proj"])
+    def test_attach_argv_targets_dashboard(self):
+        argv = self.tmux.attach_dashboard_argv()
+        self.assertEqual(argv[-3:], ["attach-session", "-t", f"={DASH_SESSION}"])
 
     def test_attach_env_drops_tmux_var(self):
         with mock.patch.dict(os.environ, {"TMUX": "/tmp/tmux-1000/default,123,0"}):
             self.assertNotIn("TMUX", self.tmux.attach_env())
 
-    def test_write_conf_creates_dedicated_config(self):
+    def test_write_conf_includes_bindings_and_hooks(self):
         self.tmux.write_conf()
         conf = self.tmux.config.tmux_conf_path.read_text()
         self.assertIn("remain-on-exit on", conf)
         self.assertIn("detach-client", conf)
+        self.assertIn("M-h select-pane -L", conf)
+        self.assertIn("select 1", conf)
+        self.assertIn("select next", conf)
+        self.assertIn("MULTI_CLAUDE_SOCKET=mc-test-none", conf)
 
-    def test_new_session_argv(self):
-        calls = []
+    def test_spawn_instance_argv(self):
         with mock.patch("subprocess.run") as run:
-            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
-            self.tmux.new_session("proj", "/tmp", ["/usr/bin/claude", "--continue"])
-            calls = [c.args[0] for c in run.call_args_list]
-        (argv,) = calls
-        self.assertIn("new-session", argv)
-        self.assertEqual(argv[argv.index("-s") + 1], "proj")
-        self.assertEqual(argv[argv.index("-c") + 1], "/tmp")
-        self.assertEqual(argv[-1], "/usr/bin/claude --continue")
+            run.return_value = mock.Mock(returncode=0, stdout="%7\n", stderr="")
+            pane_id = self.tmux.spawn_instance("proj", "/tmp", ["/usr/bin/claude", "--continue"])
+        self.assertEqual(pane_id, "%7")
+        argvs = [c.args[0] for c in run.call_args_list]
+        spawn = next(a for a in argvs if "new-window" in a)
+        self.assertEqual(spawn[spawn.index("-n") + 1], "proj")
+        self.assertEqual(spawn[spawn.index("-c") + 1], "/tmp")
+        self.assertEqual(spawn[spawn.index("-t") + 1], f"={WORK_SESSION}:")
+        self.assertEqual(spawn[-1], "/usr/bin/claude --continue")
 
     def test_queries_return_neutral_when_no_server(self):
         # Socket "mc-test-none" has no server; these must not raise.
         self.assertEqual(self.tmux.list_sessions(), [])
-        self.assertFalse(self.tmux.server_running())
-        self.assertIsNone(self.tmux.pane_info("nope"))
-        self.assertEqual(self.tmux.capture_pane("nope"), "")
+        self.assertEqual(self.tmux.list_panes(), [])
+        self.assertFalse(self.tmux.pane_exists("%1"))
+        self.assertEqual(self.tmux.capture_pane("%1"), "")
+        self.assertFalse(self.tmux.dashboard_exists())
 
 
 if __name__ == "__main__":

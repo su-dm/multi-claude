@@ -1,11 +1,13 @@
-"""Curses dashboard: sidebar of instances + live preview + vim-ish keys.
+"""Sidebar UI: a narrow curses pane inside the dashboard tmux window.
 
-Rendering rules:
-- The UI thread never calls tmux directly for polling; it reads snapshots
-  from InstanceManager (background thread) and only shells out for direct
-  user actions (create/kill/send/attach).
-- Every draw goes through _addstr, which clips to the window and swallows
-  the bottom-right-cell curses quirk, so a resize can never crash us.
+The Claude instance displayed on the right is a *real* tmux pane (swapped in
+by InstanceManager.display), so this UI only renders the instance list and
+handles management keys. Focus moves between sidebar and instance with the
+tmux-level Alt-h/Alt-l bindings; while the instance pane is focused, the
+user types into Claude directly.
+
+Drawing goes through _addstr, which clips to the window and swallows the
+bottom-right-cell curses quirk, so a resize can never crash us.
 """
 
 from __future__ import annotations
@@ -14,62 +16,62 @@ import curses
 import os
 import time
 
+from .config import SIDEBAR_WIDTH
 from .manager import InstanceManager, Snapshot
 from .status import Status
 from .tmux import TmuxError
 
-SIDEBAR_MIN = 26
-SIDEBAR_MAX = 40
-
 HELP_LINES = [
-    ("j / k, ↓ / ↑", "move selection"),
-    ("g / G", "first / last instance"),
-    ("1-9", "jump to instance"),
-    ("Enter / l / o", "attach (C-q inside to come back)"),
-    ("n", "new instance (asks for directory)"),
-    ("i", "send a message without attaching"),
+    ("j / k", "move selection"),
+    ("Enter / l", "show + focus instance"),
+    ("1-9", "show instance N"),
+    ("M-h / M-l", "focus sidebar / claude"),
+    ("M-1..9, M-o", "switch from anywhere"),
+    ("M-z", "zoom claude full screen"),
+    ("n", "new instance (Tab completes)"),
+    ("i", "send a line w/o focusing"),
     ("x", "kill instance (confirms)"),
-    ("R", "restart an exited instance"),
+    ("R", "restart exited instance"),
     ("r", "rename instance"),
-    ("q", "quit dashboard (instances keep running)"),
+    ("q / C-q", "detach (all keeps running)"),
     ("?", "toggle this help"),
 ]
 
 ICONS = {
-    Status.BUSY: "◐",
-    Status.READY: "●",
-    Status.APPROVAL: "◆",
+    Status.WORKING: "◐",
+    Status.IDLE: "●",
+    Status.HELP: "◆",
     Status.EXITED: "✖",
     Status.STARTING: "◌",
-    Status.UNKNOWN: "○",
 }
 
 
-class Dashboard:
+class Sidebar:
     def __init__(self, stdscr: "curses.window", manager: InstanceManager):
         self.scr = stdscr
         self.manager = manager
         self.selected = 0
-        self.top = 0  # sidebar scroll offset (in instances)
-        self.message = "press ? for help"
+        self.top = 0  # scroll offset (in instances)
+        self.message = "? for help"
         self.message_until = time.monotonic() + 5
         self.show_help = False
         self._init_colors()
 
-    # -- colors --------------------------------------------------------------
+    # -- colors ----------------------------------------------------------------
 
     def _init_colors(self) -> None:
         self.attr: dict[str, int] = {}
+        keys = ("working", "idle", "help", "exited", "dim", "accent")
         if not curses.has_colors():
-            for key in ("busy", "ready", "approval", "exited", "dim", "accent"):
+            for key in keys:
                 self.attr[key] = curses.A_NORMAL
             return
         curses.start_color()
         curses.use_default_colors()
         pairs = {
-            "busy": curses.COLOR_CYAN,
-            "ready": curses.COLOR_GREEN,
-            "approval": curses.COLOR_YELLOW,
+            "working": curses.COLOR_CYAN,
+            "idle": curses.COLOR_GREEN,
+            "help": curses.COLOR_YELLOW,
             "exited": curses.COLOR_RED,
             "dim": 8 if curses.COLORS > 8 else curses.COLOR_WHITE,
             "accent": curses.COLOR_MAGENTA,
@@ -80,15 +82,14 @@ class Dashboard:
 
     def _status_attr(self, status: Status) -> int:
         return {
-            Status.BUSY: self.attr["busy"],
-            Status.READY: self.attr["ready"],
-            Status.APPROVAL: self.attr["approval"] | curses.A_BOLD,
+            Status.WORKING: self.attr["working"],
+            Status.IDLE: self.attr["idle"],
+            Status.HELP: self.attr["help"] | curses.A_BOLD,
             Status.EXITED: self.attr["exited"],
             Status.STARTING: self.attr["dim"],
-            Status.UNKNOWN: self.attr["dim"],
         }[status]
 
-    # -- safe drawing ----------------------------------------------------------
+    # -- safe drawing ------------------------------------------------------------
 
     def _addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
         h, w = self.scr.getmaxyx()
@@ -99,7 +100,7 @@ class Dashboard:
         except curses.error:
             pass  # writing the bottom-right cell always errors; harmless
 
-    # -- main loop -------------------------------------------------------------
+    # -- main loop ---------------------------------------------------------------
 
     def run(self) -> None:
         curses.curs_set(0)
@@ -113,8 +114,7 @@ class Dashboard:
                     key = self.scr.get_wch()
                 except curses.error:
                     continue  # timeout tick; loop redraws with fresh snapshots
-                if not self.handle_key(key):
-                    return
+                self.handle_key(key)
         finally:
             self.manager.stop_polling()
 
@@ -128,35 +128,32 @@ class Dashboard:
         self.message = text
         self.message_until = time.monotonic() + seconds
 
-    # -- drawing -----------------------------------------------------------
+    def _enforce_width(self) -> None:
+        """Keep the sidebar pane at its fixed width after terminal resizes."""
+        pane = os.environ.get("TMUX_PANE")
+        if not pane:
+            return
+        _, w = self.scr.getmaxyx()
+        if w != SIDEBAR_WIDTH and not self.manager.tmux.dash_zoomed():
+            self.manager.tmux.resize_pane_width(pane, SIDEBAR_WIDTH)
+
+    # -- drawing -----------------------------------------------------------------
 
     def draw(self) -> None:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
-        if h < 8 or w < 40:
-            self._addstr(0, 0, "window too small for multi-claude")
-            self.scr.refresh()
-            return
         snaps = self.manager.snapshots()
         self.selected = max(0, min(self.selected, len(snaps) - 1)) if snaps else 0
-        sidebar_w = max(SIDEBAR_MIN, min(SIDEBAR_MAX, w // 3))
-        body_h = h - 2  # minus title row and footer row
-
-        self._draw_title(w)
-        self._draw_sidebar(snaps, 1, body_h, sidebar_w)
-        for y in range(1, h - 1):
-            self._addstr(y, sidebar_w, "│", self.attr["dim"])
-        self._draw_preview(snaps, 1, body_h, sidebar_w + 2, w - sidebar_w - 2)
-        self._draw_footer(h - 1, w)
+        self._addstr(0, 0, " multi-claude ".ljust(w), curses.A_BOLD | curses.A_REVERSE)
         if self.show_help:
             self._draw_help(h, w)
+            self.scr.refresh()
+            return
+        self._draw_list(snaps, 1, h - 2, w)
+        self._draw_footer(h - 1, w)
         self.scr.refresh()
 
-    def _draw_title(self, w: int) -> None:
-        self._addstr(0, 0, " multi-claude ", curses.A_BOLD | curses.A_REVERSE)
-        self._addstr(0, 15, f"{len(self.manager.registry.instances)} instance(s)", self.attr["dim"])
-
-    def _draw_sidebar(self, snaps: list[Snapshot], y0: int, height: int, width: int) -> None:
+    def _draw_list(self, snaps: list[Snapshot], y0: int, height: int, width: int) -> None:
         rows_per = 2
         visible = max(1, height // rows_per)
         if self.selected < self.top:
@@ -165,80 +162,56 @@ class Dashboard:
             self.top = self.selected - visible + 1
         if not snaps:
             self._addstr(y0 + 1, 1, "no instances yet", self.attr["dim"])
-            self._addstr(y0 + 3, 1, "press n to create one", self.attr["dim"] | curses.A_BOLD)
+            self._addstr(y0 + 3, 1, "n to create one", curses.A_BOLD)
             return
         for row, idx in enumerate(range(self.top, min(len(snaps), self.top + visible))):
             snap = snaps[idx]
             y = y0 + row * rows_per
             status = snap.status.status
-            selected = idx == self.selected
-            line_attr = curses.A_REVERSE if selected else 0
-            icon_attr = self._status_attr(status) | (curses.A_REVERSE if selected else 0)
-            index = f"{idx + 1}" if idx < 9 else " "
-            if selected:
-                self._addstr(y, 0, " " * width, line_attr)
-            self._addstr(y, 1, ICONS[status], icon_attr)
-            self._addstr(y, 3, f"{index} {snap.instance.name}"[: width - 4], line_attr | curses.A_BOLD)
+            cursor = "❯" if idx == self.selected else " "
+            name_attr = curses.A_BOLD
+            if snap.displayed:
+                name_attr |= curses.A_REVERSE  # the one on screen right now
+            index = f"{idx + 1}" if idx < 9 else "·"
+            self._addstr(y, 0, cursor, self.attr["accent"] | curses.A_BOLD)
+            self._addstr(y, 2, ICONS[status], self._status_attr(status))
+            self._addstr(y, 4, f"{index} {snap.instance.name}"[: width - 5], name_attr)
             detail = snap.status.detail or status.value
             sub = f"{_abbrev_path(snap.instance.cwd)} · {detail}"
-            sub_attr = self._status_attr(status) if status.wants_attention else self.attr["dim"]
-            self._addstr(y + 1, 3, sub[: width - 4], sub_attr)
-
-    def _draw_preview(self, snaps: list[Snapshot], y0: int, height: int, x0: int, width: int) -> None:
-        if not snaps:
-            return
-        snap = snaps[self.selected]
-        status = snap.status.status
-        header = f"{snap.instance.name} — {snap.instance.cwd}"
-        self._addstr(y0, x0, header[:width], curses.A_BOLD)
-        self._addstr(
-            y0 + 1, x0,
-            f"[{status.value}{': ' + snap.status.detail if snap.status.detail else ''}]"[:width],
-            self._status_attr(status),
-        )
-        body_y = y0 + 3
-        body_h = height - 3
-        if not snap.session_alive:
-            self._addstr(body_y, x0, "session has terminated — R to restart, x to remove", self.attr["dim"])
-            return
-        lines = [ln.rstrip() for ln in snap.preview.splitlines()]
-        while lines and not lines[-1]:
-            lines.pop()
-        for i, line in enumerate(lines[-body_h:]):
-            self._addstr(body_y + i, x0, line[:width])
+            sub_attr = (
+                self._status_attr(status)
+                if status in (Status.HELP, Status.EXITED)
+                else self.attr["dim"]
+            )
+            self._addstr(y + 1, 4, sub[: width - 5], sub_attr)
 
     def _draw_footer(self, y: int, w: int) -> None:
         if time.monotonic() < self.message_until and self.message:
-            self._addstr(y, 0, f" {self.message} ", self.attr["accent"] | curses.A_BOLD)
+            self._addstr(y, 0, f" {self.message} "[: w], self.attr["accent"] | curses.A_BOLD)
             return
-        keys = " j/k move · Enter attach · n new · i send · x kill · R restart · r rename · ? help · q quit"
-        self._addstr(y, 0, keys[: w - 1], self.attr["dim"])
+        self._addstr(y, 0, " ↵ open · n new · ? help"[: w], self.attr["dim"])
 
     def _draw_help(self, h: int, w: int) -> None:
-        box_w = min(64, w - 4)
-        box_h = len(HELP_LINES) + 4
-        y0, x0 = max(1, (h - box_h) // 2), max(2, (w - box_w) // 2)
-        for y in range(y0, y0 + box_h):
-            self._addstr(y, x0, " " * box_w, curses.A_REVERSE)
-        self._addstr(y0 + 1, x0 + 2, "multi-claude keys", curses.A_REVERSE | curses.A_BOLD)
         for i, (key, desc) in enumerate(HELP_LINES):
-            self._addstr(y0 + 3 + i, x0 + 2, f"{key:<16} {desc}"[: box_w - 4], curses.A_REVERSE)
+            y = 2 + i * 2
+            self._addstr(y, 1, key, curses.A_BOLD)
+            self._addstr(y + 1, 3, desc, self.attr["dim"])
 
-    # -- key handling --------------------------------------------------------
+    # -- key handling --------------------------------------------------------------
 
-    def handle_key(self, key) -> bool:
-        """Returns False when the dashboard should exit."""
+    def handle_key(self, key) -> None:
         if self.show_help:
             self.show_help = False
-            return True
+            return
         snaps = self.manager.snapshots()
         n = len(snaps)
         if key == curses.KEY_RESIZE:
-            return True
+            self._enforce_width()
+            return
         if isinstance(key, str):
             if key == "q":
-                return False
-            if key == "?":
+                self.manager.tmux.detach_dashboard_clients()
+            elif key == "?":
                 self.show_help = True
             elif key == "j":
                 self.selected = min(n - 1, self.selected + 1) if n else 0
@@ -251,8 +224,9 @@ class Dashboard:
             elif key.isdigit() and key != "0":
                 if int(key) <= n:
                     self.selected = int(key) - 1
+                    self.action_display(self.manager.snapshots())
             elif key in ("\n", "\r", "l", "o"):
-                self.action_attach(snaps)
+                self.action_display(snaps)
             elif key == "n":
                 self.action_new()
             elif key == "i":
@@ -268,40 +242,35 @@ class Dashboard:
         elif key == curses.KEY_UP:
             self.selected = max(0, self.selected - 1)
         elif key == curses.KEY_ENTER:
-            self.action_attach(snaps)
-        return True
+            self.action_display(snaps)
 
-    # -- actions -------------------------------------------------------------
+    # -- actions ---------------------------------------------------------------------
 
     def _current(self, snaps: list[Snapshot]) -> Snapshot | None:
         if not snaps:
-            self.flash("no instances — press n to create one")
+            self.flash("no instances — n creates one")
             return None
         return snaps[self.selected]
 
-    def action_attach(self, snaps: list[Snapshot]) -> None:
+    def action_display(self, snaps: list[Snapshot]) -> None:
         snap = self._current(snaps)
         if snap is None:
             return
-        if not snap.session_alive:
-            self.flash("session terminated — R to restart it first")
-            return
-        # Hand the terminal to tmux; curses resumes on the next refresh.
-        curses.endwin()
         try:
-            self.manager.attach(snap.instance.name)
-        finally:
-            self.scr.refresh()
-            curses.curs_set(0)
-            curses.flushinp()
-        self.manager.poll_once()
+            self.manager.display(snap.instance.name)
+        except (KeyError, TmuxError) as exc:
+            self.flash(f"error: {exc}", seconds=6)
 
     def action_new(self) -> None:
-        cwd = self.prompt("directory for new instance", initial=os.path.expanduser("~/"))
+        cwd = self.prompt(
+            "directory", initial=os.path.expanduser("~/"), completer=complete_dir
+        )
         if cwd is None:
             return
-        default_name = os.path.basename(os.path.abspath(os.path.expanduser(cwd.strip() or "~")))
-        name = self.prompt("instance name", initial=default_name)
+        default_name = os.path.basename(
+            os.path.abspath(os.path.expanduser(cwd.strip() or "~"))
+        )
+        name = self.prompt("name", initial=default_name)
         if name is None:
             return
         try:
@@ -309,8 +278,12 @@ class Dashboard:
         except (ValueError, TmuxError) as exc:
             self.flash(f"error: {exc}", seconds=8)
             return
-        self.flash(f"created {inst.name}")
         self.selected = max(0, len(self.manager.registry.instances) - 1)
+        try:
+            self.manager.display(inst.name, focus=False)
+        except (KeyError, TmuxError):
+            pass
+        self.flash(f"created {inst.name}")
 
     def action_send(self, snaps: list[Snapshot]) -> None:
         snap = self._current(snaps)
@@ -322,16 +295,20 @@ class Dashboard:
         try:
             self.manager.send_text(snap.instance.name, text)
             self.flash(f"sent to {snap.instance.name}")
-        except TmuxError as exc:
+        except (KeyError, TmuxError) as exc:
             self.flash(f"error: {exc}", seconds=8)
 
     def action_kill(self, snaps: list[Snapshot]) -> None:
         snap = self._current(snaps)
         if snap is None:
             return
-        if not self.confirm(f"kill {snap.instance.name}? (y/N)"):
+        if not self.confirm(f"kill {snap.instance.name}? y/N"):
             return
-        self.manager.kill(snap.instance.name)
+        try:
+            self.manager.kill(snap.instance.name)
+        except (KeyError, TmuxError) as exc:
+            self.flash(f"error: {exc}", seconds=8)
+            return
         self.flash(f"killed {snap.instance.name}")
         self.selected = max(0, self.selected - 1)
 
@@ -340,7 +317,7 @@ class Dashboard:
         if snap is None:
             return
         if snap.status.status is not Status.EXITED:
-            self.flash("instance is still running (restart is for exited ones)")
+            self.flash("still running (R is for exited)")
             return
         try:
             self.manager.restart(snap.instance.name)
@@ -361,12 +338,15 @@ class Dashboard:
         except (KeyError, ValueError, TmuxError) as exc:
             self.flash(f"error: {exc}", seconds=8)
 
-    # -- modal input ---------------------------------------------------------
+    # -- modal input --------------------------------------------------------------------
 
-    def prompt(self, label: str, initial: str = "") -> str | None:
-        """Single-line editor on the footer row. Enter accepts, ESC cancels."""
+    def prompt(self, label: str, initial: str = "", completer=None) -> str | None:
+        """Single-line editor on the footer row. Enter accepts, ESC cancels,
+        Tab completes (when a completer is given), C-u clears, C-w kills a
+        word. Candidates show on the row above the input."""
         h, w = self.scr.getmaxyx()
         buf = list(initial)
+        hint = ""
         curses.curs_set(1)
         self.scr.timeout(-1)  # block while editing
         try:
@@ -375,6 +355,9 @@ class Dashboard:
                 text = "".join(buf)
                 avail = max(1, w - len(prefix) - 2)
                 shown = text[-avail:]
+                self._addstr(h - 2, 0, " " * (w - 1))
+                if hint:
+                    self._addstr(h - 2, 0, f" {hint}"[: w - 1], self.attr["dim"])
                 self._addstr(h - 1, 0, " " * (w - 1))
                 self._addstr(h - 1, 0, prefix, curses.A_BOLD)
                 self._addstr(h - 1, len(prefix), shown)
@@ -389,6 +372,16 @@ class Dashboard:
                         return "".join(buf)
                     if key == "\x1b":  # ESC
                         return None
+                    if key == "\t" and completer is not None:
+                        completed, candidates = completer("".join(buf))
+                        buf = list(completed)
+                        if len(candidates) > 1:
+                            hint = "  ".join(candidates)[: 3 * w]
+                        elif not candidates:
+                            hint = "(no match)"
+                        else:
+                            hint = ""
+                        continue
                     if key in ("\x7f", "\b"):
                         if buf:
                             buf.pop()
@@ -397,23 +390,27 @@ class Dashboard:
                     elif key == "\x17":  # C-w: delete word back
                         while buf and buf[-1] == " ":
                             buf.pop()
-                        while buf and buf[-1] != " ":
+                        while buf and buf[-1] not in (" ", "/"):
                             buf.pop()
                     elif key.isprintable():
                         buf.append(key)
-                elif key in (curses.KEY_BACKSPACE,):
+                    hint = ""
+                elif key == curses.KEY_BACKSPACE:
                     if buf:
                         buf.pop()
+                    hint = ""
                 elif key == curses.KEY_RESIZE:
+                    self._enforce_width()
                     h, w = self.scr.getmaxyx()
         finally:
             curses.curs_set(0)
             self.scr.timeout(150)
+            self.draw()
 
     def confirm(self, question: str) -> bool:
         h, w = self.scr.getmaxyx()
         self._addstr(h - 1, 0, " " * (w - 1))
-        self._addstr(h - 1, 0, f" {question} ", self.attr["approval"] | curses.A_BOLD)
+        self._addstr(h - 1, 0, f" {question} "[: w - 1], self.attr["help"] | curses.A_BOLD)
         self.scr.refresh()
         self.scr.timeout(-1)
         try:
@@ -431,6 +428,43 @@ class Dashboard:
             self.scr.timeout(150)
 
 
+def complete_dir(text: str) -> tuple[str, list[str]]:
+    """Tab completion for directory paths. Returns (new_text, candidates).
+
+    Completes to the longest common prefix of matching directories; a unique
+    match gains a trailing '/'. Hidden directories only match when the
+    fragment itself starts with '.'. A leading '~' is preserved in what the
+    user sees.
+    """
+    raw = text.strip() or "~/"
+    expanded = os.path.expanduser(raw)
+    if raw.endswith("/"):
+        base, frag = expanded.rstrip("/") or "/", ""
+    else:
+        base, frag = os.path.split(expanded)
+        base = base or "."
+    try:
+        entries = sorted(
+            e
+            for e in os.listdir(base)
+            if e.startswith(frag)
+            and os.path.isdir(os.path.join(base, e))
+            and (frag.startswith(".") or not e.startswith("."))
+        )
+    except OSError:
+        return text, []
+    if not entries:
+        return text, []
+    common = os.path.commonprefix(entries)
+    completed = os.path.join(base, common)
+    if len(entries) == 1:
+        completed += "/"
+    home = os.path.expanduser("~")
+    if raw.startswith("~") and completed.startswith(home):
+        completed = "~" + completed[len(home):]
+    return completed, entries
+
+
 def _abbrev_path(path: str) -> str:
     home = os.path.expanduser("~")
     if path.startswith(home):
@@ -438,5 +472,5 @@ def _abbrev_path(path: str) -> str:
     return path
 
 
-def run_dashboard(manager: InstanceManager) -> None:
-    curses.wrapper(lambda scr: Dashboard(scr, manager).run())
+def run_sidebar(manager: InstanceManager) -> None:
+    curses.wrapper(lambda scr: Sidebar(scr, manager).run())

@@ -9,13 +9,13 @@ import unittest
 
 from multi_claude.status import Status, classify
 
-BUSY_FRAME = """\
+WORKING_FRAME = """\
 ● I'll start by reading the config module.
 
 ✻ Cogitating… (esc to interrupt · 42s · ↓ 1.2k tokens)
 """
 
-APPROVAL_FRAME = """\
+PERMISSION_FRAME = """\
 ╭──────────────────────────────────────────────╮
 │ Bash command                                 │
 │                                              │
@@ -30,15 +30,17 @@ APPROVAL_FRAME = """\
 """
 
 TRUST_FRAME = """\
- Do you trust the files in this folder?
+ Quick safety check: Is this a project you created or one you trust?
 
  /home/user/code/project
 
- ❯ 1. Yes, proceed
+ ❯ 1. Yes, I trust this folder
    2. No, exit
+
+ Enter to confirm · Esc to cancel
 """
 
-READY_FRAME = """\
+IDLE_FRAME = """\
 ● Done! The refactor is complete and all 34 tests pass.
 
 ╭──────────────────────────────────────────────╮
@@ -47,55 +49,83 @@ READY_FRAME = """\
   ? for shortcuts
 """
 
-PLAIN_SHELL_FRAME = """\
-$ ls
-Makefile  README.md
-$
+UNRECOGNIZED_FRAME = """\
+Some completely redesigned future UI
+with no strings we know about.
+"""
+
+# The transcript prefixes past USER messages with the same "❯" glyph dialogs
+# use for their cursor — a resting session showing history must be idle.
+TRANSCRIPT_FRAME = """\
+❯ /model
+  ⎿  Set model to Sonnet 5 and saved as your default for new sessions
+❯ hey
+● Hey! What are you working on?
+
+╭──────────────────────────────────────────────╮
+│ >                                            │
+╰──────────────────────────────────────────────╯
+  ? for shortcuts
 """
 
 
 class ClassifyTest(unittest.TestCase):
     def test_dead_pane_wins(self):
-        self.assertIs(classify(READY_FRAME, pane_dead=True).status, Status.EXITED)
+        self.assertIs(classify(IDLE_FRAME, pane_dead=True).status, Status.EXITED)
 
     def test_empty_is_starting(self):
         self.assertIs(classify("").status, Status.STARTING)
         self.assertIs(classify("\n\n  \n").status, Status.STARTING)
 
-    def test_busy(self):
-        info = classify(BUSY_FRAME)
-        self.assertIs(info.status, Status.BUSY)
+    def test_working_spinner(self):
+        info = classify(WORKING_FRAME)
+        self.assertIs(info.status, Status.WORKING)
         self.assertIn("Cogitating", info.detail)
 
-    def test_busy_beats_prompt_box(self):
-        # While working, the input box may still be on screen; busy wins.
-        info = classify(READY_FRAME + "\n✻ Working… (esc to interrupt)")
-        self.assertIs(info.status, Status.BUSY)
+    def test_working_beats_prompt_box(self):
+        # While working, the input box may still be on screen; working wins.
+        info = classify(IDLE_FRAME + "\n✻ Working… (esc to interrupt)")
+        self.assertIs(info.status, Status.WORKING)
 
-    def test_approval_dialog(self):
-        info = classify(APPROVAL_FRAME)
-        self.assertIs(info.status, Status.APPROVAL)
+    def test_permission_dialog_is_help(self):
+        info = classify(PERMISSION_FRAME)
+        self.assertIs(info.status, Status.HELP)
         self.assertIn("Do you want to proceed?", info.detail)
 
-    def test_trust_prompt_is_approval(self):
-        self.assertIs(classify(TRUST_FRAME).status, Status.APPROVAL)
+    def test_trust_prompt_is_help(self):
+        self.assertIs(classify(TRUST_FRAME).status, Status.HELP)
 
-    def test_ready_prompt(self):
-        self.assertIs(classify(READY_FRAME).status, Status.READY)
+    def test_help_even_when_changed(self):
+        # A dialog that just appeared (screen changed) is still HELP.
+        self.assertIs(classify(PERMISSION_FRAME, changed=True).status, Status.HELP)
 
-    def test_unrecognized_is_unknown(self):
-        self.assertIs(classify(PLAIN_SHELL_FRAME).status, Status.UNKNOWN)
+    def test_idle_prompt(self):
+        self.assertIs(classify(IDLE_FRAME).status, Status.IDLE)
 
-    def test_old_spinner_in_scrollback_does_not_mark_busy(self):
+    def test_transcript_user_prompt_glyph_is_not_help(self):
+        self.assertIs(classify(TRANSCRIPT_FRAME).status, Status.IDLE)
+
+    def test_change_fallback_unrecognized_screen(self):
+        # Unknown UI: a changing screen means work, a static one means idle.
+        self.assertIs(classify(UNRECOGNIZED_FRAME, changed=True).status, Status.WORKING)
+        self.assertIs(classify(UNRECOGNIZED_FRAME, changed=False).status, Status.IDLE)
+
+    def test_change_fallback_does_not_override_idle_box(self):
+        # The idle input box with changed=True (e.g. the user is typing a
+        # message themselves) — markers say idle only if no dialog/spinner,
+        # but a changing screen still counts as working to be safe.
+        self.assertIs(classify(IDLE_FRAME, changed=True).status, Status.WORKING)
+
+    def test_old_spinner_in_scrollback_does_not_mark_working(self):
         # Marker appears far above the tail (stale frame); tail is a prompt.
-        stale = "✻ Working… (esc to interrupt)\n" + ("\n. filler" * 30) + "\n" + READY_FRAME
-        self.assertIs(classify(stale).status, Status.READY)
+        stale = "✻ Working… (esc to interrupt)\n" + ("\n. filler" * 30) + "\n" + IDLE_FRAME
+        self.assertIs(classify(stale).status, Status.IDLE)
 
     def test_attention_flags(self):
-        self.assertTrue(Status.READY.wants_attention)
-        self.assertTrue(Status.APPROVAL.wants_attention)
+        self.assertTrue(Status.IDLE.wants_attention)
+        self.assertTrue(Status.HELP.wants_attention)
         self.assertTrue(Status.EXITED.wants_attention)
-        self.assertFalse(Status.BUSY.wants_attention)
+        self.assertFalse(Status.WORKING.wants_attention)
         self.assertFalse(Status.STARTING.wants_attention)
 
 

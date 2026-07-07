@@ -27,12 +27,15 @@ class RegistryTest(unittest.TestCase):
 
     def test_roundtrip(self):
         reg = self.make()
-        reg.add(Instance(name="alpha", cwd="/tmp", command=["claude"]))
+        reg.add(Instance(name="alpha", cwd="/tmp", command=["claude"], pane_id="%3"))
         reg2 = self.make()
         inst = reg2.get("alpha")
         self.assertIsNotNone(inst)
         self.assertEqual(inst.cwd, "/tmp")
         self.assertEqual(inst.command, ["claude"])
+        self.assertEqual(inst.pane_id, "%3")
+        self.assertIs(reg2.get_by_pane("%3"), inst)
+        self.assertIsNone(reg2.get_by_pane(""))  # empty pane_id never matches
 
     def test_duplicate_add_rejected(self):
         reg = self.make()
@@ -63,12 +66,18 @@ class RegistryTest(unittest.TestCase):
         reg.add(Instance(name="a", cwd="/tmp"))  # and it can save again
         self.assertEqual(json.loads(self.path.read_text())["instances"][0]["name"], "a")
 
-    def test_adopt_unknown_sessions(self):
+    def test_adopt_panes(self):
         reg = self.make()
-        reg.add(Instance(name="known", cwd="/tmp"))
-        adopted = reg.adopt_unknown_sessions(["known", "stray"])
+        reg.add(Instance(name="known", cwd="/tmp", pane_id="%1"))
+        adopted = reg.adopt_panes([("%1", "known"), ("%9", "stray")])
         self.assertEqual([i.name for i in adopted], ["stray"])
-        self.assertIsNotNone(self.make().get("stray"))
+        self.assertEqual(self.make().get("stray").pane_id, "%9")
+
+    def test_adopt_panes_dedupes_name_collisions(self):
+        reg = self.make()
+        reg.add(Instance(name="proj", cwd="/tmp", pane_id="%1"))
+        adopted = reg.adopt_panes([("%2", "proj")])
+        self.assertEqual(adopted[0].name, "proj-2")
 
 
 if __name__ == "__main__":
