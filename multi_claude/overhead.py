@@ -6,18 +6,22 @@ its poll loop), the welcome placeholder, and the keep-alive sleep. Claude
 instances themselves are reported separately for contrast, not counted as
 overhead.
 
-CPU is sampled from /proc/<pid>/stat utime+stime over a real interval (the
-cumulative average since process start would understate a poll loop's steady
-cost). RSS comes from /proc/<pid>/status VmRSS.
+CPU is sampled over a real interval (the cumulative average since process
+start would understate a poll loop's steady cost). On Linux the samples come
+from /proc (<pid>/stat utime+stime, <pid>/status VmRSS); elsewhere (macOS)
+from `ps -o cputime=,rss=`.
 """
 
 from __future__ import annotations
 
 import os
 import resource
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 
+_LINUX = sys.platform.startswith("linux")
 _CLK_TCK = os.sysconf("SC_CLK_TCK")
 
 
@@ -29,28 +33,65 @@ class ProcSample:
     cpu_percent: float = 0.0
 
 
-def _cpu_ticks(pid: int) -> int | None:
+def _ps_field(pid: int, field: str) -> str:
     try:
-        with open(f"/proc/{pid}/stat") as fh:
-            fields = fh.read().rsplit(") ", 1)[1].split()
-        # fields[11]=utime, fields[12]=stime (0-indexed after comm)
-        return int(fields[11]) + int(fields[12])
-    except (OSError, IndexError, ValueError):
+        return subprocess.run(
+            ["ps", "-ww", "-o", f"{field}=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except OSError:
+        return ""
+
+
+def _parse_cputime(s: str) -> float | None:
+    """`ps -o cputime=` clock format: [[dd-]hh:]mm:ss[.ss] -> seconds."""
+    s = s.strip()
+    if not s:
         return None
+    days = 0.0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        try:
+            days = float(d)
+        except ValueError:
+            return None
+    try:
+        secs = sum(float(p) * 60**i for i, p in enumerate(reversed(s.split(":"))))
+    except ValueError:
+        return None
+    return days * 86400 + secs
+
+
+def _cpu_seconds(pid: int) -> float | None:
+    if _LINUX:
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                fields = fh.read().rsplit(") ", 1)[1].split()
+            # fields[11]=utime, fields[12]=stime (0-indexed after comm)
+            return (int(fields[11]) + int(fields[12])) / _CLK_TCK
+        except (OSError, IndexError, ValueError):
+            return None
+    return _parse_cputime(_ps_field(pid, "cputime"))
 
 
 def _rss_kib(pid: int) -> int:
+    if _LINUX:
+        try:
+            with open(f"/proc/{pid}/status") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1])
+        except (OSError, IndexError, ValueError):
+            pass
+        return 0
     try:
-        with open(f"/proc/{pid}/status") as fh:
-            for line in fh:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1])
-    except (OSError, IndexError, ValueError):
-        pass
-    return 0
+        return int(_ps_field(pid, "rss"))
+    except ValueError:
+        return 0
 
 
-def _children(pid: int) -> list[int]:
+def _children_linux(pid: int) -> list[int]:
     kids = []
     try:
         for tid in os.listdir(f"/proc/{pid}/task"):
@@ -62,21 +103,42 @@ def _children(pid: int) -> list[int]:
     return kids
 
 
+def _children_map() -> dict[int, list[int]]:
+    """ppid -> child pids for every process, from one `ps` snapshot."""
+    kids: dict[int, list[int]] = {}
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True
+        ).stdout
+    except OSError:
+        return kids
+    for line in out.splitlines():
+        try:
+            pid, ppid = map(int, line.split())
+        except ValueError:
+            continue
+        kids.setdefault(ppid, []).append(pid)
+    return kids
+
+
 def _tree(pid: int) -> list[int]:
+    kids = None if _LINUX else _children_map()
     pids, queue = [], [pid]
     while queue:
         p = queue.pop()
         pids.append(p)
-        queue += _children(p)
+        queue += _children_linux(p) if kids is None else kids.get(p, [])
     return pids
 
 
 def _cmdline(pid: int) -> str:
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
-    except OSError:
-        return ""
+    if _LINUX:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                return fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            return ""
+    return _ps_field(pid, "command")
 
 
 def _label(cmd: str) -> str:
@@ -86,7 +148,7 @@ def _label(cmd: str) -> str:
         return "welcome pane"
     if cmd.startswith("tmux"):
         return "tmux server"
-    if "sleep infinity" in cmd:
+    if cmd.startswith("sleep"):
         return "keep-alive sleep"
     return "helper: " + cmd[:50]
 
@@ -115,12 +177,12 @@ def measure(manager, interval: float = 2.0) -> tuple[list[ProcSample], list[Proc
             claude.append(sample)
         else:
             overhead.append(sample)
-    before = {s.pid: _cpu_ticks(s.pid) for s in overhead + claude}
+    before = {s.pid: _cpu_seconds(s.pid) for s in overhead + claude}
     time.sleep(interval)
     for sample in overhead + claude:
-        b, a = before.get(sample.pid), _cpu_ticks(sample.pid)
+        b, a = before.get(sample.pid), _cpu_seconds(sample.pid)
         if b is not None and a is not None:
-            sample.cpu_percent = 100.0 * (a - b) / _CLK_TCK / interval
+            sample.cpu_percent = 100.0 * (a - b) / interval
         sample.rss_kib = _rss_kib(sample.pid)
     return overhead, claude
 
@@ -152,7 +214,7 @@ def print_stats(manager, interval: float = 2.0) -> None:
 
 def poll_cost_percent(manager, cycles: int = 10) -> float:
     """CPU of one status-poll cycle, measured in-process via rusage so the
-    short-lived tmux/git subprocesses (invisible to /proc sampling of
+    short-lived tmux/git subprocesses (invisible to interval sampling of
     long-lived pids) are counted. Returns %-of-one-core at 1 poll/s."""
     manager.poll_once()  # warm caches
     s0 = resource.getrusage(resource.RUSAGE_SELF)

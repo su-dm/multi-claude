@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Launcher that runs multi-claude straight from the repo (no pip install
+# needed — the package is stdlib-only). install.sh symlinks this into
+# ~/.local/bin; resolve the symlink to find the repo.
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+exec env PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}" python3 -m multi_claude "$@"

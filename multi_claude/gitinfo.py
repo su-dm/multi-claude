@@ -88,8 +88,10 @@ class GitStatusCache:
 def worktree_root(repo_dir: str) -> str:
     """Sibling directory holding this repo's multi-claude worktrees:
     ~/code/proj -> ~/code/proj.worktrees/ (plain directories, so the user can
-    browse every workspace side by side)."""
-    return os.path.abspath(repo_dir).rstrip("/") + ".worktrees"
+    browse every workspace side by side). Symlinks are resolved so the result
+    is comparable with git's own (resolved) --show-toplevel output — on macOS
+    /tmp and /var are symlinks into /private."""
+    return os.path.realpath(repo_dir).rstrip("/") + ".worktrees"
 
 
 def repo_identity(cwd: str) -> str | None:

@@ -16,6 +16,7 @@ import curses
 import os
 import shlex
 import shutil
+import sys
 import textwrap
 import time
 
@@ -25,14 +26,29 @@ from .status import Status
 from .tmux import TmuxError
 from .transcripts import fmt_cost, fmt_model, fmt_tokens
 
+# Alt on Linux; on macOS the same bindings are the Option key (the letter
+# ones also work when the terminal types ˙/¬/Ω/ø/å instead of sending Meta).
+_MAC = sys.platform == "darwin"
+_M = "⌥" if _MAC else "M-"
+
 HELP_LINES = [
     ("j / k", "move selection"),
     ("Enter / l", "show + focus instance"),
     ("1-9", "show instance N"),
-    ("M-h / M-l", "focus sidebar / claude"),
-    ("M-1..9, M-o", "switch from anywhere"),
-    ("a / M-a", "jump to agent needing input"),
-    ("M-z", "zoom claude full screen"),
+    (f"{_M}h / {_M}l", "focus sidebar / claude"),
+    (f"{_M}1..9, {_M}o", "switch from anywhere"),
+    *(
+        [
+            ("", "  (⌥ keys need Option set to"),
+            ("", "  Esc+/Meta in your terminal's"),
+            ("", "  key settings, see bottom;"),
+            ("", "  C-b o also switches panes)"),
+        ]
+        if _MAC
+        else []
+    ),
+    (f"a / {_M}a", "jump to agent needing input"),
+    (f"{_M}z", "zoom claude full screen"),
     ("v", "toggle compact/expanded view"),
     ("< / >", "narrow / widen the sidebar (persisted)"),
     ("n", "new instance (Tab completes;"),
@@ -50,7 +66,8 @@ HELP_LINES = [
     ("S", "agent: condense work to skill"),
     ("H", "agent: write HANDOFF.md"),
     ("q / C-q", "detach (all keeps running)"),
-    ("C-c", "quit dashboard (agents keep running)"),
+    ("C-c", "quit dashboard (agents keep running;"),
+    ("", "  also works on a dead agent pane)"),
     ("?", "this help (q closes)"),
 ]
 
@@ -60,6 +77,16 @@ def help_text() -> str:
     out = ["", "  multi-claude keys", "  " + "─" * 17, ""]
     for key, desc in HELP_LINES:
         out.append(f"  {key:<12} {desc}")
+    if _MAC:
+        out += [
+            "",
+            "  ⌥ keys: set Option to send Esc+/Meta, or the",
+            "  ⌥ combos type accents instead of reaching tmux:",
+            "    iTerm2:   Settings → Profiles → Keys → General",
+            "              → Left Option key: Esc+",
+            "    Terminal: Settings → Profiles → Keyboard",
+            "              → Use Option as Meta key",
+        ]
     out += ["", "  reopen a closed dashboard with: multi-claude", ""]
     return "\n".join(out)
 

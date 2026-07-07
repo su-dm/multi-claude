@@ -8,8 +8,8 @@ Managing my claude-code sessions was getting annoying.
 I wanted a single dashboard where I can switch between them while monitoring the status of my other agents.
 This is a minimal tmux-backed claude-code manager with tmux/vim style key-binds.
 There's other projects that attempt to do something similar, 
-for example [cmux](https://github.com/manaflow-ai/cmux) is really nice but only for MacOS and requires a shell installation.
-Multi-Claude works within your existing shell and on Linux. If you have any feature requests let me know.
+for example [cmux](https://github.com/manaflow-ai/cmux) is really nice but only for macOS and requires a shell installation.
+Multi-Claude works within your existing shell, on Linux and macOS. If you have any feature requests let me know.
 
 
 [multi-claude-demo.webm](https://github.com/user-attachments/assets/ac0cc83b-c512-4c75-b80b-b0b0d99940af)
@@ -40,7 +40,7 @@ Multi-Claude works within your existing shell and on Linux. If you have any feat
 
 ## Install
 
-Requires Linux, Python ≥ 3.10, tmux ≥ 3.2, and
+Requires Linux or macOS, Python ≥ 3.10, tmux ≥ 3.2, and
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 ```bash
@@ -65,6 +65,14 @@ reverts it. The installer prints the full list; nothing else is touched.
 | `Alt-1..9` · `Alt-o` · `Alt-a` | switch agent · next · next-needing-input |
 | `Alt-z` / `C-q` | zoom pane / detach (everything keeps running) |
 | `C-c` (in sidebar) | quit the dashboard — agents keep running; `multi-claude` reopens |
+
+macOS: `Alt` is the Option key, and your terminal must send it as Meta/Esc —
+iTerm2: Settings → Profiles → Keys → General → *Left Option key: Esc+*;
+Terminal.app: Settings → Profiles → Keyboard → *Use Option as Meta key*.
+Without it, Option combos type accented characters (or nothing, on dead-key
+layouts like US Extended) and never reach the dashboard. On a plain US layout
+the letter combos (`⌥h/l/z/o/a`) also work without that setting, and tmux's
+default `C-b o` prefix always switches panes.
 
 | Sidebar | |
 | --- | --- |

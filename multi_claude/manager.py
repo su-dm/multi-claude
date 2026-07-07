@@ -12,10 +12,12 @@ the user interacts with the real Claude pane directly.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -576,9 +578,20 @@ class InstanceManager:
         """Best-effort desktop notification; the UI also rings the bell."""
         if not self.config.notify:
             return
-        if shutil.which("notify-send"):
-            subprocess.Popen(
-                ["notify-send", "-a", "multi-claude", f"{name}: {status.value}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+        if sys.platform == "darwin":
+            # json.dumps produces a double-quoted, backslash-escaped literal,
+            # which is also valid AppleScript string syntax.
+            script = (
+                f"display notification {json.dumps(f'{name}: {status.value}')}"
+                ' with title "multi-claude"'
             )
+            cmd = ["osascript", "-e", script]
+        elif shutil.which("notify-send"):
+            cmd = ["notify-send", "-a", "multi-claude", f"{name}: {status.value}"]
+        else:
+            return
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )

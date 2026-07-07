@@ -109,25 +109,40 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sidebar", help=argparse.SUPPRESS)
     sub.add_parser("welcome", help=argparse.SUPPRESS)
     sub.add_parser("help-popup", help=argparse.SUPPRESS)
+    sub.add_parser("quit", help=argparse.SUPPRESS)  # C-c on a dead pane
 
     return parser
 
 
 def run_welcome() -> None:
     """Placeholder process for the viewer slot before any instance exists."""
+    mac = sys.platform == "darwin"
+    mod = "⌥" if mac else "Alt-"
+    mac_hint = (
+        "  ⌥ keys need Option to send Esc+/Meta (else they\n"
+        "  type accents instead of reaching tmux):\n"
+        "    iTerm2:   Settings→Profiles→Keys→General\n"
+        "              → Left Option key: Esc+\n"
+        "    Terminal: Settings→Profiles→Keyboard\n"
+        "              → Use Option as Meta key\n"
+        "  Meanwhile C-b o (tmux prefix) switches panes.\n"
+        if mac
+        else ""
+    )
     print(
         "\n  multi-claude\n"
         "  ────────────\n"
         "  No instance selected.\n\n"
-        "  Sidebar keys (focus it with Alt-h):\n"
+        f"  Sidebar keys (focus it with {mod}h):\n"
         "    n         new instance (Tab completes directories)\n"
         "    Enter     show + focus the selected instance\n"
         "    ?         full key reference\n\n"
         "  From anywhere in the dashboard:\n"
-        "    Alt-1..9  switch instance   Alt-o  next instance\n"
-        "    Alt-h/l   move focus        Alt-z  zoom this pane\n"
-        "    C-q       detach            C-c    quit dashboard\n"
-        "              (either way, agents keep running)\n",
+        f"    {mod + '1..9':<8}  switch instance   {mod + 'o':<5} next instance\n"
+        f"    {mod + 'h/' + mod + 'l':<8}  move focus        {mod + 'z':<5} zoom this pane\n"
+        f"    {'C-q':<8}  detach            {'C-c':<5} quit dashboard\n"
+        "              (either way, agents keep running)\n\n"
+        + mac_hint,
         flush=True,
     )
     while True:  # keep the pane alive; content is static
@@ -209,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "help-popup":
             run_help_popup()
+            return 0
+        if args.cmd == "quit":
+            # tmux C-c binding on a dead pane: same graceful shutdown as C-c
+            # in the sidebar (park the displayed agent, kill the dashboard).
+            manager.shutdown_dashboard()
             return 0
         if args.cmd == "select":
             manager.select(args.which)

@@ -2,6 +2,7 @@
 construction, config generation, and env handling for nested attach."""
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,19 @@ class TmuxArgvTest(unittest.TestCase):
         self.assertIn("select 1", conf)
         self.assertIn("select next", conf)
         self.assertIn("MULTI_CLAUDE_SOCKET=mc-test-none", conf)
+        # C-c on a dead pane quits the dashboard; live panes get C-c as-is.
+        self.assertIn('if-shell -F "#{pane_dead}"', conf)
+        self.assertIn("send-keys C-c", conf)
+
+    def test_write_conf_macos_option_key_fallbacks(self):
+        self.tmux.write_conf()
+        conf = self.tmux.config.tmux_conf_path.read_text()
+        # ˙/¬ are what Option+h/l type on a macOS US layout.
+        if sys.platform == "darwin":
+            self.assertIn("bind-key -n ˙ select-pane -L", conf)
+            self.assertIn("bind-key -n ¬ select-pane -R", conf)
+        else:
+            self.assertNotIn("˙", conf)
 
     def test_spawn_instance_argv(self):
         with mock.patch("subprocess.run") as run:

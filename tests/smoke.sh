@@ -156,8 +156,9 @@ MC stats | grep -q "TOTAL OVERHEAD" || fail "stats did not report overhead"
 echo "6e. archive hides + keeps revivable; unarchive resumes"
 MC archive smoke2 >/dev/null
 MC ls | grep -E "^smoke2 " | grep -qF "archived" || fail "smoke2 not marked archived"
-T list-panes -a -F '#{pane_start_command}' | grep fake_claude | grep -v multi_claude \
-  | wc -l | grep -qx "1" || fail "archived pane not killed"
+# -eq comparison, not string match: BSD wc pads its output with spaces.
+[ "$(T list-panes -a -F '#{pane_start_command}' | grep fake_claude | grep -v multi_claude | wc -l)" -eq 1 ] \
+  || fail "archived pane not killed"
 MC unarchive smoke2 >/dev/null
 wait_status smoke2 "idle"
 MC pin smoke2 | grep -qx "pinned smoke2" || fail "pin failed"

@@ -17,7 +17,7 @@ smoke:
 check: test smoke
 
 install:
-	@command -v tmux >/dev/null || { echo "error: tmux is required (sudo apt install tmux)"; exit 1; }
+	@command -v tmux >/dev/null || { echo "error: tmux is required (brew install tmux / sudo apt install tmux)"; exit 1; }
 	@mkdir -p $(BIN)
 	ln -sf $(CURDIR)/bin/multi-claude $(BIN)/multi-claude
 	@echo "installed: $(BIN)/multi-claude (symlink into this repo)"

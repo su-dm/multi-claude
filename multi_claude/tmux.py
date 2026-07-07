@@ -156,7 +156,8 @@ class Tmux:
             # (and so displayed instances always have a home to swap back to).
             self._run(
                 "new-session", "-d", "-s", WORK_SESSION, "-n", "-keep",
-                "-x", "220", "-y", "50", "sleep infinity",
+                # ~68 years; "sleep infinity" is GNU-only (fails on macOS).
+                "-x", "220", "-y", "50", "sleep 2147483647",
             )
 
     def spawn_instance(self, name: str, cwd: str, command: list[str]) -> str:

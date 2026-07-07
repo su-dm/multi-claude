@@ -176,7 +176,30 @@ class Config:
         select_binds = "\n".join(
             f'bind-key -n M-{n} run-shell "{mc} select {n}"' for n in range(1, 10)
         )
-        return TMUX_CONF_TEMPLATE.format(mc=mc, select_binds=select_binds)
+        return TMUX_CONF_TEMPLATE.format(
+            mc=mc, select_binds=select_binds, option_binds=self._option_binds(mc)
+        )
+
+    def _option_binds(self, mc: str) -> str:
+        """macOS fallbacks: terminals there don't send Alt/Meta by default —
+        Option+h types "˙" etc. Bind those literal characters (US layout) so
+        the navigation keys work without reconfiguring the terminal. Letters
+        only: Option+digits produce £/§/…, which are real typeable symbols on
+        common layouts and must keep reaching the agent panes.
+        Opt out with MULTI_CLAUDE_OPTION_KEYS=0 (e.g. non-US layouts where
+        one of these characters is a regular letter, like å)."""
+        if sys.platform != "darwin" or _env("OPTION_KEYS", "1") == "0":
+            return ""
+        return "\n".join(
+            [
+                "# macOS: what Option+h/l/z/o/a type on a US layout (see above).",
+                "bind-key -n ˙ select-pane -L",
+                "bind-key -n ¬ select-pane -R",
+                "bind-key -n Ω resize-pane -Z",
+                f'bind-key -n ø run-shell "{mc} select next"',
+                f'bind-key -n å run-shell "{mc} select attention"',
+            ]
+        )
 
 
 # Config for OUR tmux server only; never touches the user's tmux setup.
@@ -197,6 +220,10 @@ set -g escape-time 10
 # -- dashboard keys (no prefix needed) --------------------------------------
 # C-q: detach the dashboard client (everything keeps running).
 bind-key -n C-q detach-client
+# C-c on a dead pane (exited agent) quits the dashboard gracefully — same as
+# C-c in the sidebar — instead of being swallowed by the dead pane. Live
+# panes receive C-c unchanged (it interrupts claude / quits the sidebar).
+bind-key -n C-c if-shell -F "#{{pane_dead}}" 'run-shell "{mc} quit"' 'send-keys C-c'
 # Alt-h / Alt-l: move focus between the sidebar and the Claude pane.
 bind-key -n M-h select-pane -L
 bind-key -n M-l select-pane -R
@@ -207,6 +234,7 @@ bind-key -n M-z resize-pane -Z
 bind-key -n M-o run-shell "{mc} select next"
 # Alt-a: jump to the next agent that needs your input.
 bind-key -n M-a run-shell "{mc} select attention"
+{option_binds}
 
 set -g status on
 set -g status-style "bg=colour236,fg=colour250"
