@@ -8,7 +8,7 @@ Managing my claude-code sessions was getting annoying.
 I wanted a single dashboard where I can switch between them while monitoring the status of my other agents.
 This is a minimal tmux-backed claude-code manager with tmux/vim style key-binds.
 There's other projects that attempt to do something similar, 
-for example [cmux](https://github.com/manaflow-ai/cmux is) really nice but only for MacOS and requires a shell installation.
+for example [cmux](https://github.com/manaflow-ai/cmux) is really nice but only for MacOS and requires a shell installation.
 Multi-Claude works within your existing shell and on Linux. If you have any feature requests let me know.
 
 
