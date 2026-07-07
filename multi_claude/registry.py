@@ -25,6 +25,22 @@ class Instance:
     # Immutable tmux pane id ("%N") — the instance's real handle. Empty for
     # entries whose pane is gone entirely (restartable from metadata).
     pane_id: str = ""
+    # When the current claude process started (updated on restart); used to
+    # match the instance to its Claude Code session transcript.
+    started_at: float = 0.0
+    # Claude Code session id (transcript filename stem), learned by the
+    # poller once the transcript is matched. Enables precise resume
+    # (claude --resume <id>) after a reboot or crash.
+    session_id: str = ""
+    # Pinned instances sort to the top of the sidebar.
+    pinned: bool = False
+    # Archived: hidden from the sidebar, pane killed, but metadata +
+    # session_id kept so the conversation can be revived later.
+    archived: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.started_at:
+            self.started_at = self.created_at
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -37,6 +53,10 @@ class Instance:
             command=list(data.get("command", [])),
             created_at=float(data.get("created_at", 0)),
             pane_id=data.get("pane_id", ""),
+            started_at=float(data.get("started_at", 0)),
+            session_id=data.get("session_id", ""),
+            pinned=bool(data.get("pinned", False)),
+            archived=bool(data.get("archived", False)),
         )
 
 
@@ -133,6 +153,16 @@ class Registry:
             raise ValueError(f"instance {new!r} already exists")
         inst.name = new
         self.save()
+
+    def ordered(self, include_archived: bool = False) -> list["Instance"]:
+        """Sidebar/selection order: pinned first (stable), archived last or
+        hidden. This ordering is shared by the UI and `select N` so numbers
+        always mean the same instance."""
+        active = [i for i in self.instances if not i.archived]
+        result = [i for i in active if i.pinned] + [i for i in active if not i.pinned]
+        if include_archived:
+            result += [i for i in self.instances if i.archived]
+        return result
 
     def get_by_pane(self, pane_id: str) -> Instance | None:
         return next((i for i in self.instances if pane_id and i.pane_id == pane_id), None)

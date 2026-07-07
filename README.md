@@ -1,158 +1,137 @@
 # multi-claude
 
-A terminal dashboard for running and supervising **multiple Claude Code
-instances** on Linux. A sidebar lists every instance with a live three-state
-status — **working / idle / help** (help = Claude is waiting on you: a
-permission prompt, a plan approval, a question) — and the selected
-instance's *real, fully interactive* Claude session sits right next to it.
-You type into Claude directly while the sidebar stays visible.
+**Run a fleet of Claude Code agents from one terminal.**
 
-Inspired by [cmux](https://github.com/manaflow-ai/cmux) (Electron, macOS),
-but terminal-native: it runs in any terminal, works over SSH, and instances
-survive dashboard restarts because tmux owns them, not the UI.
+A tmux-backed dashboard for Linux: a sidebar shows every agent's live status,
+context size, cost, and what it's thinking — the selected agent's *real,
+fully interactive* session sits right next to it. Type into Claude while
+watching the rest of the fleet.
 
 ```
  multi-claude                     │ ● Done! All 34 tests pass. Next I'll
- ❯ ◐ 1 backend                    │   wire up the retry logic.
-     ~/code/backend · Refactoring…│
-   ● 2 frontend                   │ ╭──────────────────────────────────╮
-     ~/code/frontend · idle       │ │ > fix the flaky websocket test█   │
-   ◆ 3 infra                      │ ╰──────────────────────────────────╯
-     ~/code/infra · help          │   ? for shortcuts
- ↵ open · n new · ? help          │            ← this is the real Claude
+ ❯ ◐ 1 ✦backend             87k   │   wire up the retry logic.
+     ~/code/backend · working     │
+     sonnet-5 · $1.84 · main +3   │ ╭──────────────────────────────────╮
+     ∴ the retry loop double-fires│ │ > fix the flaky websocket test█   │
+   ● 2 frontend             31k   │ ╰──────────────────────────────────╯
+     ~/code/frontend · idle       │   ? for shortcuts
+   ◆ 3 infra               156k   │
+     ~/code/infra · help          │        ← the actual Claude session,
+ ↵ open · n new · ? help          │           not a preview
 ```
 
-## Requirements
+## Key features
 
-- Linux (developed on Ubuntu), Python ≥ 3.10 (stdlib only — no pip deps)
-- tmux ≥ 3.x
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
+- **Live side-by-side** — the pane next to the sidebar *is* the agent's tmux
+  pane (perfect fidelity, mouse, scrollback). `Alt-1..9` switches agents from
+  anywhere; `Alt-a` jumps to whichever agent needs your input.
+- **Three-state status** — working ◐ / idle ● / **help** ◆ (permission
+  prompt, plan approval, question), with desktop notifications when an agent
+  starts waiting on you.
+- **Deep session insight** — per agent: context tokens (yellow at 150k, red
+  at 180k), model, session cost, git branch + dirty count, and a one-line
+  "current thought" read live from the agent's own transcript.
+- **Exact costs (opt-in)** — `multi-claude install-statusline` captures the
+  cost figure Claude Code itself computes; without it you get a pricing-table
+  estimate marked `~`.
+- **Survives everything** — agents live on a dedicated tmux server, not in
+  the UI. Dashboard crash: nothing happens. Reboot:
+  `multi-claude resume-all` relaunches every agent *continuing its exact
+  conversation* (`--resume <session-id>`).
+- **Parallel agents on one repo** — spawn agents on isolated **git
+  worktrees** (`<repo>.worktrees/<branch>`, browsable side by side); merge
+  their branches normally when done.
+- **Archive & pin** — `d` hides a finished agent (revivable later with its
+  conversation intact), `p` pins the important one to the top.
+- **Agent knowledge capture** — `S` asks an agent to condense the session's
+  discoveries into a reusable skill; `H` asks it to write `HANDOFF.md` so the
+  next session picks up where it left off.
+- **Zero heavy deps** — stdlib Python + tmux. No Electron, no pip installs.
 
 ## Install
 
+Requires Linux, Python ≥ 3.10, tmux ≥ 3.2, and
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+
 ```bash
-./install.sh            # checks deps, symlinks into ~/.local/bin
-multi-claude            # open the dashboard
+git clone <this repo> && cd multi-claude
+./install.sh        # symlinks into ~/.local/bin, prints storage locations
+multi-claude        # open the dashboard
 ```
 
-Or `pipx install .` if you prefer a managed install. `make uninstall`
-removes the symlink.
+State lives in `~/.local/share/multi-claude/` (registry, generated tmux
+conf, captured costs) plus the dedicated tmux server (`tmux -L
+multi-claude`). The installer prints the full list; nothing else is touched.
 
 ## Usage
 
-The dashboard is a tmux window on a dedicated server (your own tmux setup is
-untouched): a fixed sidebar pane plus a viewer slot holding the selected
-instance's actual pane. Focus follows tmux rules — when the Claude pane is
-focused you are simply *in* Claude Code: full TUI, scrollback, mouse.
-
-### Keys that work anywhere in the dashboard (no prefix)
-
-| Key | Action |
+| Keys (anywhere) | |
 | --- | --- |
-| `Alt-h` / `Alt-l` | focus sidebar / Claude pane |
-| `Alt-1`…`Alt-9` | display instance N |
-| `Alt-o` | cycle to the next instance |
-| `Alt-z` | zoom the focused pane full-screen (again to restore) |
-| `C-q` | detach — dashboard and all instances keep running |
+| `Alt-h` / `Alt-l` | focus sidebar / Claude |
+| `Alt-1..9` · `Alt-o` · `Alt-a` | switch agent · next · next-needing-input |
+| `Alt-z` / `C-q` | zoom pane / detach (everything keeps running) |
 
-### Sidebar keys (vim flavored)
-
-| Key | Action |
+| Sidebar | |
 | --- | --- |
-| `j` / `k`, `g` / `G` | move selection |
-| `Enter` / `l` | display selected instance and focus it |
-| `1`–`9` | display instance N |
-| `n` | new instance — **Tab autocompletes directories** in the prompt |
-| `i` | send a one-line message without moving focus |
-| `x` | kill instance (asks for confirmation) |
-| `R` | restart an exited instance (same directory & args) |
-| `r` | rename instance |
-| `q` | detach (same as `C-q`) |
-| `?` | help overlay |
-
-When an instance transitions from working to idle or help, the dashboard
-rings the terminal bell and (if `notify-send` exists) posts a desktop
-notification. Disable with `MULTI_CLAUDE_NOTIFY=0`.
-
-### CLI (scripting interface)
+| `j k g G` / `Enter` | move / show + focus agent |
+| `v` | expanded view (model · cost · git · current thought) |
+| `n` | new agent — Tab completes dirs; offers worktree isolation in repos |
+| `p` / `d` / `A` | pin · archive (revivable) · show archived |
+| `N` | toggle notifications (persisted; also `multi-claude notify on\|off`) |
+| `R` / `C` | restart fresh / **resume conversation** |
+| `i` / `x` / `r` | send one line / kill / rename |
+| `c` / `S` / `H` | open claude configs · condense-to-skill · write HANDOFF.md |
+| `?` | full key reference |
 
 ```bash
-multi-claude new ~/code/backend -n backend    # spawn without opening the UI
-multi-claude new ~/code/api -- --continue     # args after -- go to claude
-multi-claude ls                               # status; '*' marks displayed
-multi-claude send backend "run the tests"     # type into an instance
-multi-claude attach backend                   # open dashboard on an instance
-multi-claude kill backend
-multi-claude bootstrap                        # build dashboard, don't attach
+multi-claude new ~/code/api -n api            # spawn without the UI
+multi-claude new ~/code/api -w agent/fix-auth # spawn on an isolated worktree
+multi-claude ls                               # names, status, tokens, dirs
+multi-claude send api "run the tests"         # type into an agent
+multi-claude resume-all                       # after a reboot: continue all
+multi-claude archive api && multi-claude unarchive api
+multi-claude install-statusline               # exact cost reporting (opt-in)
+multi-claude stats                            # multi-claude's own CPU/RAM cost
 ```
 
-### Configuration (environment variables)
+Configuration via `MULTI_CLAUDE_*` env vars: `SOCKET`, `DATA_DIR`,
+`CLAUDE_CMD`, `CLAUDE_HOME`, `POLL_INTERVAL` (default 1s), `NOTIFY` (=0
+disables bell/notify-send).
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `MULTI_CLAUDE_CLAUDE_CMD` | `claude` | binary to launch (resolved to an absolute path) |
-| `MULTI_CLAUDE_SOCKET` | `multi-claude` | tmux socket name (isolates the server) |
-| `MULTI_CLAUDE_DATA_DIR` | `~/.local/share/multi-claude` | registry + generated tmux.conf |
-| `MULTI_CLAUDE_POLL_INTERVAL` | `1.0` | seconds between status polls |
-| `MULTI_CLAUDE_NOTIFY` | `1` | `0` disables bell/desktop notifications |
+## How it works
 
-## Design
+Each agent is a **tmux pane** on a dedicated server (your own tmux setup is
+never touched). Hidden agents park in a background session; selecting one
+`swap-pane`s it next to the sidebar — so there is no preview/attach split and
+no embedded terminal emulator, and the UI is stateless by construction.
 
-### Why a tmux backend instead of embedding terminals (like cmux)?
+Status detection is two-layered: marker matching on the visible screen
+(spinner → working, `❯ 1.` dialogs → help, input box → idle), with a
+screen-change fallback so a future Claude Code UI degrades gracefully instead
+of breaking. Tokens, model, cost, and the "current thought" line come from
+Claude Code's own transcript files (`~/.claude/projects/…`); exact costs come
+from its statusline hook when installed.
 
-Each instance is a tmux *pane* (tracked by its immutable pane id) on a
-dedicated server (`tmux -L multi-claude`, own config). Undisplayed instances
-park as windows of a hidden `mc-work` session; selecting one `swap-pane`s it
-into the dashboard's viewer slot. Because the thing next to the sidebar *is*
-the live pane, there is no preview/attach split, no embedded terminal
-emulator to maintain, and rendering fidelity is exact — tmux is the terminal
-emulator. Compared to cmux this also buys:
+Overhead is deliberately tiny: **~40 MiB RAM and <1% of one core** for the
+whole dashboard (measured; see `multi-claude stats`), independent of how
+heavy the agents themselves are.
 
-- **Crash isolation / persistence**: the UI is stateless; kill it, restart
-  it, reattach from another SSH session — instances are unaffected.
-- **Zero heavyweight deps**: no Electron, no Node; stdlib Python + tmux.
-- **Composability**: everything is scriptable (`multi-claude send`, plain
-  `tmux -L multi-claude …`).
+## Compatibility
 
-### Status detection (working / idle / help) & contingencies
-
-`multi_claude/status.py` is the only module that knows what Claude Code's UI
-looks like (verified against 2.1.x). Two layers:
-
-1. **Markers** on the visible screen: a spinner line containing
-   `esc to interrupt` → *working*; an option list with a `❯` cursor or an
-   `Enter to confirm` / `Do you want…` footer → *help* (permissions, plan
-   approval, trust prompt, questions); the `│ >` input box → *idle*.
-2. **Screen-change fallback**: the poller hashes each pane's visible text;
-   a changing screen with no dialog counts as *working*, a static
-   unrecognized one as *idle*. So even if a future Claude Code changes every
-   string, the three states stay approximately right instead of breaking.
-
-A dead pane means *exited* (kept via `remain-on-exit` so you can read the
-last output and press `R` to restart). Marker fixtures live in
-`tests/test_status.py`.
-
-Other contingencies handled deliberately:
-
-- **nvm-installed claude**: the absolute path is resolved at spawn time.
-- **Nested tmux**: attaching unsets `$TMUX`; all dashboard bindings are
-  Alt-based and prefix-less, so they pass through your outer tmux untouched.
-- **Multi-process state**: the sidebar, CLI calls, and tmux key bindings all
-  share the registry file; every writer saves atomically and every reader
-  reloads on mtime change.
-- **Corrupt/lost state file**: preserved as `.corrupt` and rebuilt; instance
-  panes found on the server but missing from the registry are adopted,
-  never killed.
-- **Sidebar crash**: `remain-on-exit` keeps the traceback visible; the next
-  `multi-claude` invocation respawns dead dashboard panes.
+Each release is verified against a specific Claude Code series — see
+[CHANGELOG.md](CHANGELOG.md). `multi-claude --version` prints the verified
+series, and the dashboard warns if your installed Claude Code differs. Status
+heuristics live in one file (`multi_claude/status.py`) with fixtures, so
+adapting to a UI change is a small, tested edit.
 
 ## Development
 
 ```bash
-make test    # unit tests (status, registry, tmux argv, dir completion)
-make smoke   # integration: real tmux + tests/fake_claude.py stand-in
+make test    # unit tests (status, registry, transcripts, git, completion)
+make smoke   # integration: real tmux + a fake-claude stand-in (no API use)
 make check   # both
 ```
 
-The smoke test runs on an isolated socket and data dir and needs no Claude
-install or network. See `JOURNAL.md` for the development log and backlog.
+`JOURNAL.md` is the running engineering log (decisions, measured numbers,
+tmux gotchas). Contributions should keep `make check` green and update
+CHANGELOG.md with the Claude Code series they verified against.

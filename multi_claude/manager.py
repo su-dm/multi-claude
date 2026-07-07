@@ -16,12 +16,23 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 
 from .config import Config, DASH_SESSION, SIDEBAR_WIDTH, WORK_SESSION
 from .registry import Instance, Registry
 from .status import Status, StatusInfo, classify
 from .tmux import Pane, Tmux, TmuxError
+from .gitinfo import (
+    GitError,
+    GitStatus,
+    GitStatusCache,
+    create_worktree,
+    is_git_repo,
+    repo_identity,
+)
+from .statusline import reported_cost
+from .transcripts import SessionInfo, TokenReader
 
 
 @dataclass
@@ -30,6 +41,9 @@ class Snapshot:
     status: StatusInfo = field(default_factory=lambda: StatusInfo(Status.EXITED))
     pane_alive: bool = False  # pane exists (possibly dead process)
     displayed: bool = False
+    tokens: int | None = None  # context tokens of the agent's session
+    session: SessionInfo | None = None  # model/cost/activity from transcript
+    git: GitStatus | None = None
 
 
 def _is_instance_pane(pane: Pane) -> bool:
@@ -50,6 +64,7 @@ class InstanceManager:
         self.config = config
         self.tmux = Tmux(config)
         config.ensure_dirs()
+        config.apply_saved_settings()
         self.registry = Registry(config.registry_path)
         self._lock = threading.Lock()
         self._snapshots: dict[str, Snapshot] = {}
@@ -57,6 +72,8 @@ class InstanceManager:
         self._poll_thread: threading.Thread | None = None
         self._prev_status: dict[str, Status] = {}
         self._prev_screen: dict[str, int] = {}  # pane_id -> hash of last capture
+        self._tokens = TokenReader(config.claude_home)
+        self._git = GitStatusCache()
         self.attention_events: list[tuple[str, Status]] = []
 
     # -- dashboard plumbing ---------------------------------------------------
@@ -80,6 +97,30 @@ class InstanceManager:
         else:
             self.tmux.respawn_dead_dash_panes(self.sidebar_cmd(), self.welcome_cmd())
             self.ensure_viewer()
+        self.poll_once()
+
+    def refresh_ui(self) -> None:
+        """Restart the sidebar/welcome processes in place (e.g. after
+        upgrading multi-claude) WITHOUT touching instance panes. Never kill
+        the mc-dash session for this — a displayed instance lives inside it
+        and would die with it."""
+        if not self.tmux.dashboard_exists():
+            self.bootstrap_dashboard()
+            return
+        self.tmux.write_conf()
+        self.tmux.source_conf()
+        displayed = self.registry.get_by_pane(self.displayed_pane_id())
+        if displayed is not None:
+            self.display_welcome()  # park it clear of the respawns
+        sidebar = self._sidebar_pane()
+        if sidebar is not None:
+            self.tmux.respawn_shell(sidebar.pane_id, self.sidebar_cmd())
+        welcome = self._welcome_pane()
+        if welcome is not None:
+            self.tmux.respawn_shell(welcome.pane_id, self.welcome_cmd())
+        self.ensure_viewer()
+        if displayed is not None:
+            self.display(displayed.name, focus=False)
         self.poll_once()
 
     def migrate_legacy_sessions(self) -> None:
@@ -131,10 +172,19 @@ class InstanceManager:
         return viewer.pane_id if viewer else ""
 
     def _welcome_pane(self) -> Pane | None:
-        for pane in self.tmux.list_panes():
-            if "multi_claude welcome" in pane.start_command:
-                return pane
-        return None
+        """The welcome placeholder pane. Only one may exist: duplicates can
+        appear if ensure_viewer spawned a spare while another welcome was
+        parked — prefer the one in the dashboard, kill the rest."""
+        found = [
+            p for p in self.tmux.list_panes()
+            if "multi_claude welcome" in p.start_command
+        ]
+        if not found:
+            return None
+        found.sort(key=lambda p: p.session != DASH_SESSION)  # dash first
+        for extra in found[1:]:
+            self.tmux.kill_pane(extra.pane_id)
+        return found[0]
 
     def display(self, name: str, focus: bool = True) -> None:
         """Swap the instance's pane into the viewer slot."""
@@ -205,7 +255,20 @@ class InstanceManager:
         snaps = self.snapshots_fresh()
         if not snaps:
             return
-        if which in ("next", "prev"):
+        if which == "attention":
+            # Jump to the next agent that is blocked on the user, scanning
+            # forward from the currently displayed one.
+            alive = [s for s in snaps if s.pane_alive]
+            if not alive:
+                return
+            current = next((i for i, s in enumerate(alive) if s.displayed), -1)
+            rotated = alive[current + 1 :] + alive[: current + 1]
+            target = next(
+                (s for s in rotated if s.status.status is Status.HELP), None
+            )
+            if target is None:
+                return  # nobody needs help; quiet no-op from a key binding
+        elif which in ("next", "prev"):
             alive = [s for s in snaps if s.pane_alive]
             if not alive:
                 return
@@ -225,13 +288,31 @@ class InstanceManager:
 
     # -- instance lifecycle -----------------------------------------------------
 
+    def is_git_dir(self, cwd: str) -> bool:
+        return is_git_repo(os.path.abspath(os.path.expanduser(cwd)))
+
+    def repo_top(self, cwd: str) -> str | None:
+        return repo_identity(os.path.abspath(os.path.expanduser(cwd)))
+
     def create(
-        self, cwd: str, name: str | None = None, claude_args: list[str] | None = None
+        self,
+        cwd: str,
+        name: str | None = None,
+        claude_args: list[str] | None = None,
+        worktree_branch: str | None = None,
     ) -> Instance:
+        """Spawn an instance in cwd. worktree_branch isolates the agent on a
+        fresh git worktree of the repo at cwd (created under
+        <repo>.worktrees/<branch>) instead of the shared checkout."""
         self.registry.maybe_reload()
         cwd = os.path.abspath(os.path.expanduser(cwd))
         if not os.path.isdir(cwd):
             raise ValueError(f"not a directory: {cwd}")
+        if worktree_branch:
+            try:
+                cwd = create_worktree(cwd, worktree_branch.strip())
+            except GitError as exc:
+                raise ValueError(str(exc)) from exc
         claude = self.config.resolve_claude_cmd()
         if claude is None:
             raise ValueError(
@@ -260,19 +341,76 @@ class InstanceManager:
             self._snapshots.pop(name, None)
         self._prev_status.pop(name, None)
         self._prev_screen.pop(inst.pane_id, None)
+        self._tokens.forget(name)
 
-    def restart(self, name: str) -> None:
-        """Re-launch claude for an exited instance (dead pane or gone pane)."""
+    def archive(self, name: str) -> None:
+        """Kill the agent's pane but keep it in the registry (hidden from the
+        sidebar). Its conversation stays resumable via unarchive."""
         self.registry.maybe_reload()
         inst = self.registry.get(name)
         if inst is None:
             raise KeyError(name)
-        command = inst.command or [self.config.resolve_claude_cmd() or "claude"]
+        if inst.pane_id and self.tmux.pane_exists(inst.pane_id):
+            if self.displayed_pane_id() == inst.pane_id:
+                self.display_welcome()
+            self.tmux.kill_pane(inst.pane_id)
+        inst.pane_id = ""
+        inst.archived = True
+        self.registry.save()
+        self._tokens.forget(name)
+        self.poll_once()
+
+    def unarchive(self, name: str, resume: bool = True) -> None:
+        """Bring an archived agent back: relaunch it (continuing its old
+        conversation by default) and show it in the sidebar again."""
+        self.registry.maybe_reload()
+        inst = self.registry.get(name)
+        if inst is None:
+            raise KeyError(name)
+        inst.archived = False
+        self.registry.save()
+        self.restart(name, resume=resume)
+
+    def toggle_notify(self) -> bool:
+        self.config.notify = not self.config.notify
+        self.config.save_setting("notify", self.config.notify)
+        return self.config.notify
+
+    def toggle_pin(self, name: str) -> bool:
+        self.registry.maybe_reload()
+        inst = self.registry.get(name)
+        if inst is None:
+            raise KeyError(name)
+        inst.pinned = not inst.pinned
+        self.registry.save()
+        self.poll_once()
+        return inst.pinned
+
+    def restart(self, name: str, resume: bool = False) -> None:
+        """Re-launch claude for an exited instance (dead pane or gone pane).
+
+        resume=True continues the previous conversation: precisely via
+        `--resume <session-id>` when the poller learned the session id,
+        otherwise `--continue` (most recent conversation in that cwd).
+        """
+        self.registry.maybe_reload()
+        inst = self.registry.get(name)
+        if inst is None:
+            raise KeyError(name)
+        command = list(inst.command) or [self.config.resolve_claude_cmd() or "claude"]
+        if resume:
+            command = [
+                a for a in command
+                if a not in ("--continue", "-c", "--resume", "-r") and a != inst.session_id
+            ]
+            command += ["--resume", inst.session_id] if inst.session_id else ["--continue"]
         if inst.pane_id and self.tmux.pane_exists(inst.pane_id):
             self.tmux.respawn_pane(inst.pane_id, inst.cwd, command)
         else:
             inst.pane_id = self.tmux.spawn_instance(inst.name, inst.cwd, command)
-            self.registry.save()
+        inst.started_at = time.time()  # a fresh claude session begins now
+        self.registry.save()
+        self._tokens.forget(inst.name)
         self.poll_once()
 
     def rename(self, old: str, new: str) -> str:
@@ -303,6 +441,7 @@ class InstanceManager:
     # -- polling ------------------------------------------------------------
 
     def poll_once(self) -> None:
+        self.config.apply_saved_settings()
         self.registry.maybe_reload()
         panes = {p.pane_id: p for p in self.tmux.list_panes()}
         self._adopt_strays(panes)
@@ -323,11 +462,32 @@ class InstanceManager:
                 )
                 self._prev_screen[inst.pane_id] = digest
                 snap.status = classify(text, pane_dead=pane.dead, changed=changed)
+                snap.session = self._tokens.info_for(
+                    inst.name, inst.cwd, inst.started_at or inst.created_at
+                )
+                if snap.session:
+                    snap.tokens = snap.session.tokens
+                    exact = reported_cost(self.config, snap.session.session_id)
+                    if exact is not None:
+                        # Claude Code's own number (statusline hook) beats
+                        # our pricing-table estimate.
+                        snap.session.cost_usd = exact
+                        snap.session.cost_source = "claude"
+                    if snap.session.session_id and inst.session_id != snap.session.session_id:
+                        # Remember the session so we can --resume it after a
+                        # reboot/crash. Saved once per change, not per poll.
+                        inst.session_id = snap.session.session_id
+                        self.registry.save()
+                snap.git = self._git.status(inst.cwd)
             else:
                 snap.status = StatusInfo(Status.EXITED)
             prev = self._prev_status.get(inst.name)
             now = snap.status.status
-            if prev in (Status.WORKING, Status.STARTING) and now.wants_attention:
+            if (
+                prev in (Status.WORKING, Status.STARTING)
+                and now.wants_attention
+                and not inst.archived
+            ):
                 events.append((inst.name, now))
             self._prev_status[inst.name] = now
             snapshots[inst.name] = snap
@@ -346,11 +506,15 @@ class InstanceManager:
         if strays:
             self.registry.adopt_panes(strays)
 
-    def snapshots(self) -> list[Snapshot]:
-        """Ordered snapshots (registry order); safe copy for the UI thread."""
+    def snapshots(self, include_archived: bool = False) -> list[Snapshot]:
+        """Snapshots in sidebar order (pinned first, archived hidden unless
+        requested); safe copy for the UI thread."""
         with self._lock:
             by_name = dict(self._snapshots)
-        return [by_name.get(i.name, Snapshot(instance=i)) for i in self.registry.instances]
+        return [
+            by_name.get(i.name, Snapshot(instance=i))
+            for i in self.registry.ordered(include_archived)
+        ]
 
     def snapshots_fresh(self) -> list[Snapshot]:
         self.poll_once()

@@ -73,6 +73,19 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual([i.name for i in adopted], ["stray"])
         self.assertEqual(self.make().get("stray").pane_id, "%9")
 
+    def test_ordered_pins_first_hides_archived(self):
+        reg = self.make()
+        reg.add(Instance(name="a", cwd="/tmp"))
+        reg.add(Instance(name="b", cwd="/tmp"))
+        reg.add(Instance(name="c", cwd="/tmp"))
+        reg.get("c").pinned = True
+        reg.get("b").archived = True
+        reg.save()
+        self.assertEqual([i.name for i in reg.ordered()], ["c", "a"])
+        self.assertEqual([i.name for i in reg.ordered(include_archived=True)], ["c", "a", "b"])
+        # persisted across reload
+        self.assertEqual([i.name for i in self.make().ordered()], ["c", "a"])
+
     def test_adopt_panes_dedupes_name_collisions(self):
         reg = self.make()
         reg.add(Instance(name="proj", cwd="/tmp", pane_id="%1"))

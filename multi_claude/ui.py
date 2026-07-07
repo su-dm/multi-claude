@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import curses
 import os
+import shlex
 import time
 
+from . import CLAUDE_CODE_VERIFIED
 from .config import SIDEBAR_WIDTH
 from .manager import InstanceManager, Snapshot
 from .status import Status
 from .tmux import TmuxError
+from .transcripts import fmt_cost, fmt_model, fmt_tokens
 
 HELP_LINES = [
     ("j / k", "move selection"),
@@ -27,12 +30,23 @@ HELP_LINES = [
     ("1-9", "show instance N"),
     ("M-h / M-l", "focus sidebar / claude"),
     ("M-1..9, M-o", "switch from anywhere"),
+    ("a / M-a", "jump to agent needing input"),
     ("M-z", "zoom claude full screen"),
-    ("n", "new instance (Tab completes)"),
+    ("v", "toggle compact/expanded view"),
+    ("n", "new instance (Tab completes;"),
+    ("", "  offers git worktree isolation)"),
     ("i", "send a line w/o focusing"),
+    ("p", "pin/unpin to top"),
+    ("d", "archive (hide, revivable)"),
+    ("A", "show/hide archived"),
+    ("N", "toggle notifications"),
     ("x", "kill instance (confirms)"),
-    ("R", "restart exited instance"),
+    ("R", "restart exited (fresh)"),
+    ("C", "resume exited (continue convo)"),
     ("r", "rename instance"),
+    ("c", "open claude configs/skills"),
+    ("S", "agent: condense work to skill"),
+    ("H", "agent: write HANDOFF.md"),
     ("q / C-q", "detach (all keeps running)"),
     ("?", "toggle this help"),
 ]
@@ -55,6 +69,9 @@ class Sidebar:
         self.message = "? for help"
         self.message_until = time.monotonic() + 5
         self.show_help = False
+        self.expanded = False
+        self.show_archived = False
+        self.help_top = 0
         self._init_colors()
 
     # -- colors ----------------------------------------------------------------
@@ -89,6 +106,17 @@ class Sidebar:
             Status.STARTING: self.attr["dim"],
         }[status]
 
+    def _token_attr(self, tokens: int | None) -> int:
+        """Context-size coloring; thresholds assume the common 200k window
+        (informational only — actual limits vary by model)."""
+        if tokens is None:
+            return self.attr["dim"]
+        if tokens >= 180_000:
+            return self.attr["exited"] | curses.A_BOLD
+        if tokens >= 150_000:
+            return self.attr["help"]
+        return self.attr["dim"]
+
     # -- safe drawing ------------------------------------------------------------
 
     def _addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
@@ -105,6 +133,12 @@ class Sidebar:
     def run(self) -> None:
         curses.curs_set(0)
         self.scr.timeout(150)
+        series = self.manager.config.claude_code_series()
+        if series and series != CLAUDE_CODE_VERIFIED:
+            self.flash(
+                f"claude code {series}.x untested (verified {CLAUDE_CODE_VERIFIED}.x)",
+                seconds=10,
+            )
         self.manager.start_polling()
         try:
             while True:
@@ -142,7 +176,7 @@ class Sidebar:
     def draw(self) -> None:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
-        snaps = self.manager.snapshots()
+        snaps = self.manager.snapshots(include_archived=self.show_archived)
         self.selected = max(0, min(self.selected, len(snaps) - 1)) if snaps else 0
         self._addstr(0, 0, " multi-claude ".ljust(w), curses.A_BOLD | curses.A_REVERSE)
         if self.show_help:
@@ -153,8 +187,11 @@ class Sidebar:
         self._draw_footer(h - 1, w)
         self.scr.refresh()
 
+    def _rows_per_item(self) -> int:
+        return 4 if self.expanded else 2
+
     def _draw_list(self, snaps: list[Snapshot], y0: int, height: int, width: int) -> None:
-        rows_per = 2
+        rows_per = self._rows_per_item()
         visible = max(1, height // rows_per)
         if self.selected < self.top:
             self.top = self.selected
@@ -173,10 +210,17 @@ class Sidebar:
             if snap.displayed:
                 name_attr |= curses.A_REVERSE  # the one on screen right now
             index = f"{idx + 1}" if idx < 9 else "·"
+            tokens = fmt_tokens(snap.tokens)
+            pin = "✦" if snap.instance.pinned else ""
+            if snap.instance.archived:
+                name_attr = self.attr["dim"]
+            name_room = width - 5 - (len(tokens) + 1 if tokens else 0)
             self._addstr(y, 0, cursor, self.attr["accent"] | curses.A_BOLD)
             self._addstr(y, 2, ICONS[status], self._status_attr(status))
-            self._addstr(y, 4, f"{index} {snap.instance.name}"[: width - 5], name_attr)
-            detail = snap.status.detail or status.value
+            self._addstr(y, 4, f"{index} {pin}{snap.instance.name}"[:name_room], name_attr)
+            if tokens:
+                self._addstr(y, width - len(tokens) - 1, tokens, self._token_attr(snap.tokens))
+            detail = "archived" if snap.instance.archived else (snap.status.detail or status.value)
             sub = f"{_abbrev_path(snap.instance.cwd)} · {detail}"
             sub_attr = (
                 self._status_attr(status)
@@ -184,6 +228,28 @@ class Sidebar:
                 else self.attr["dim"]
             )
             self._addstr(y + 1, 4, sub[: width - 5], sub_attr)
+            if self.expanded:
+                self._draw_expanded_rows(snap, y, width)
+
+    def _draw_expanded_rows(self, snap: Snapshot, y: int, width: int) -> None:
+        """Rows 3-4 of an expanded item: model · cost · git, then activity."""
+        facts = []
+        sess = snap.session
+        if sess and sess.model:
+            facts.append(fmt_model(sess.model))
+        if sess and sess.cost_usd is not None:
+            approx = "~" if sess.cost_source == "estimate" else ""
+            facts.append(f"{approx}{fmt_cost(sess.cost_usd)}")
+        if snap.git:
+            facts.append(snap.git.summary())
+        self._addstr(y + 2, 4, " · ".join(facts)[: width - 5], self.attr["dim"])
+        activity = ""
+        if snap.status.status is Status.WORKING:
+            # Prefer the live transcript line over the screen-scraped spinner.
+            activity = (sess.activity if sess else "") or snap.status.detail
+        elif sess:
+            activity = sess.activity or sess.title
+        self._addstr(y + 3, 4, activity[: width - 5], self.attr["accent"])
 
     def _draw_footer(self, y: int, w: int) -> None:
         if time.monotonic() < self.message_until and self.message:
@@ -192,18 +258,31 @@ class Sidebar:
         self._addstr(y, 0, " ↵ open · n new · ? help"[: w], self.attr["dim"])
 
     def _draw_help(self, h: int, w: int) -> None:
-        for i, (key, desc) in enumerate(HELP_LINES):
-            y = 2 + i * 2
-            self._addstr(y, 1, key, curses.A_BOLD)
-            self._addstr(y + 1, 3, desc, self.attr["dim"])
+        visible = h - 3
+        self.help_top = max(0, min(self.help_top, len(HELP_LINES) - visible))
+        for row, (key, desc) in enumerate(
+            HELP_LINES[self.help_top : self.help_top + visible]
+        ):
+            y = 2 + row
+            self._addstr(y, 1, f"{key:<12}"[:13], curses.A_BOLD)
+            self._addstr(y, 14, desc[: w - 15], self.attr["dim"])
+        more = len(HELP_LINES) - self.help_top - visible
+        hint = f"j/k scroll ({more} more) · any key closes" if more > 0 else "any key closes"
+        self._addstr(h - 1, 0, f" {hint}"[: w - 1], self.attr["accent"])
 
     # -- key handling --------------------------------------------------------------
 
     def handle_key(self, key) -> None:
         if self.show_help:
-            self.show_help = False
+            if key in ("j", curses.KEY_DOWN):
+                self.help_top += 1
+            elif key in ("k", curses.KEY_UP):
+                self.help_top = max(0, self.help_top - 1)
+            else:
+                self.show_help = False
+                self.help_top = 0
             return
-        snaps = self.manager.snapshots()
+        snaps = self.manager.snapshots(include_archived=self.show_archived)
         n = len(snaps)
         if key == curses.KEY_RESIZE:
             self._enforce_width()
@@ -234,9 +313,41 @@ class Sidebar:
             elif key == "x":
                 self.action_kill(snaps)
             elif key == "R":
-                self.action_restart(snaps)
+                self.action_restart(snaps, resume=False)
+            elif key == "C":
+                self.action_restart(snaps, resume=True)
             elif key == "r":
                 self.action_rename(snaps)
+            elif key == "a":
+                self.manager.select("attention")
+            elif key == "v":
+                self.expanded = not self.expanded
+                self.top = 0
+            elif key == "N":
+                on = self.manager.toggle_notify()
+                self.flash("notifications " + ("ON" if on else "OFF"))
+            elif key == "A":
+                self.show_archived = not self.show_archived
+                self.top = 0
+                self.flash("showing archived" if self.show_archived else "hiding archived")
+            elif key == "p":
+                self.action_pin(snaps)
+            elif key == "d":
+                self.action_archive(snaps)
+            elif key == "c":
+                self.action_config()
+            elif key == "S":
+                self.action_invoke_skill(
+                    snaps, "condense-to-skill",
+                    "Use the condense-to-skill skill: condense the non-obvious "
+                    "work from this session into a reusable skill file and save it.",
+                )
+            elif key == "H":
+                self.action_invoke_skill(
+                    snaps, "handoff",
+                    "Use the handoff skill: write or update the project's "
+                    "HANDOFF.md progress file for a fresh session to continue from.",
+                )
         elif key == curses.KEY_DOWN:
             self.selected = min(n - 1, self.selected + 1) if n else 0
         elif key == curses.KEY_UP:
@@ -261,20 +372,65 @@ class Sidebar:
         except (KeyError, TmuxError) as exc:
             self.flash(f"error: {exc}", seconds=6)
 
+    def _agents_in(self, cwd: str) -> list[str]:
+        """Names of live (non-archived) agents working in this directory or
+        anywhere in the same git repo (incl. its worktrees' parent repo)."""
+        target = os.path.abspath(os.path.expanduser(cwd or "~"))
+        target_top = self.manager.repo_top(target) or target
+        names = []
+        for inst in self.manager.registry.ordered():
+            inst_top = self.manager.repo_top(inst.cwd) or inst.cwd
+            if inst.cwd == target or inst_top == target_top:
+                names.append(inst.name)
+        return names
+
     def action_new(self) -> None:
         cwd = self.prompt(
             "directory", initial=os.path.expanduser("~/"), completer=complete_dir
         )
         if cwd is None:
             return
-        default_name = os.path.basename(
-            os.path.abspath(os.path.expanduser(cwd.strip() or "~"))
+        cwd = cwd.strip()
+        worktree_branch = None
+        others = self._agents_in(cwd)
+        if self.manager.is_git_dir(cwd):
+            if others:
+                title = f"⚠ {', '.join(others[:3])} already here — isolate?"
+                options = [
+                    ("isolated worktree + branch (recommended)", "worktree"),
+                    ("shared checkout (agents may collide!)", "shared"),
+                ]
+            else:
+                title = "git repo — where should this agent work?"
+                options = [
+                    ("shared checkout (touch the same files)", "shared"),
+                    ("isolated worktree + branch", "worktree"),
+                ]
+            mode = self.pick(title, options)
+            if mode is None:
+                return
+            if mode == "worktree":
+                worktree_branch = self.prompt("branch name", initial="agent/")
+                if worktree_branch is None or not worktree_branch.strip():
+                    return
+                worktree_branch = worktree_branch.strip()
+        elif others:
+            # Not a git repo, so worktree isolation isn't possible — say so
+            # instead of silently letting agents collide.
+            if not self.confirm(
+                f"{others[0]} already works here (no git → no worktree) — share dir? y/N"
+            ):
+                return
+        default_name = worktree_branch.split("/")[-1] if worktree_branch else os.path.basename(
+            os.path.abspath(os.path.expanduser(cwd or "~"))
         )
         name = self.prompt("name", initial=default_name)
         if name is None:
             return
         try:
-            inst = self.manager.create(cwd.strip(), name.strip() or None)
+            inst = self.manager.create(
+                cwd, name.strip() or None, worktree_branch=worktree_branch
+            )
         except (ValueError, TmuxError) as exc:
             self.flash(f"error: {exc}", seconds=8)
             return
@@ -312,17 +468,109 @@ class Sidebar:
         self.flash(f"killed {snap.instance.name}")
         self.selected = max(0, self.selected - 1)
 
-    def action_restart(self, snaps: list[Snapshot]) -> None:
+    def action_restart(self, snaps: list[Snapshot], resume: bool = False) -> None:
         snap = self._current(snaps)
         if snap is None:
             return
+        if snap.instance.archived:
+            try:
+                self.manager.unarchive(snap.instance.name, resume=resume)
+                self.flash(f"revived {snap.instance.name}")
+            except (KeyError, ValueError, TmuxError) as exc:
+                self.flash(f"error: {exc}", seconds=8)
+            return
         if snap.status.status is not Status.EXITED:
-            self.flash("still running (R is for exited)")
+            self.flash("still running (R/C are for exited)")
             return
         try:
-            self.manager.restart(snap.instance.name)
-            self.flash(f"restarted {snap.instance.name}")
+            self.manager.restart(snap.instance.name, resume=resume)
+            verb = "resumed" if resume else "restarted"
+            self.flash(f"{verb} {snap.instance.name}")
         except (KeyError, ValueError, TmuxError) as exc:
+            self.flash(f"error: {exc}", seconds=8)
+
+    def action_pin(self, snaps: list[Snapshot]) -> None:
+        snap = self._current(snaps)
+        if snap is None:
+            return
+        try:
+            pinned = self.manager.toggle_pin(snap.instance.name)
+            self.flash(("pinned " if pinned else "unpinned ") + snap.instance.name)
+            self.selected = 0 if pinned else self.selected
+        except KeyError as exc:
+            self.flash(f"error: {exc}", seconds=8)
+
+    def action_archive(self, snaps: list[Snapshot]) -> None:
+        snap = self._current(snaps)
+        if snap is None:
+            return
+        if snap.instance.archived:
+            # Archived + d = revive.
+            try:
+                self.manager.unarchive(snap.instance.name)
+                self.flash(f"revived {snap.instance.name}")
+            except (KeyError, ValueError, TmuxError) as exc:
+                self.flash(f"error: {exc}", seconds=8)
+            return
+        if snap.status.status is Status.WORKING:
+            if not self.confirm(f"{snap.instance.name} is working — archive anyway? y/N"):
+                return
+        try:
+            self.manager.archive(snap.instance.name)
+            self.flash(f"archived {snap.instance.name} (A shows archived, d revives)")
+            self.selected = max(0, self.selected - 1)
+        except (KeyError, TmuxError) as exc:
+            self.flash(f"error: {exc}", seconds=8)
+
+    def action_config(self) -> None:
+        """Pick a claude config file/dir and open it in $EDITOR via a tmux
+        popup over the dashboard. Project entries come from the selected
+        instance's directory."""
+        snaps = self.manager.snapshots()
+        cwd = snaps[self.selected].instance.cwd if snaps else os.path.expanduser("~")
+        home = str(self.manager.config.claude_home)
+        entries = [
+            ("global CLAUDE.md", os.path.join(home, "CLAUDE.md")),
+            ("global settings.json", os.path.join(home, "settings.json")),
+            ("global skills/", os.path.join(home, "skills")),
+            ("global agents/", os.path.join(home, "agents")),
+            ("project CLAUDE.md", os.path.join(cwd, "CLAUDE.md")),
+            ("project settings.json", os.path.join(cwd, ".claude", "settings.json")),
+            ("project settings.local.json", os.path.join(cwd, ".claude", "settings.local.json")),
+            ("project skills/", os.path.join(cwd, ".claude", "skills")),
+        ]
+        target = self.pick("open config", [
+            (label + ("" if os.path.exists(path) else "  (new)"), path)
+            for label, path in entries
+        ])
+        if target is None:
+            return
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+        if os.path.isdir(target):
+            # Directory (skills/agents): open the editor's file browser there.
+            cmd = f"cd {shlex.quote(target)} && {editor} ."
+        else:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            cmd = f"{editor} {shlex.quote(target)}"
+        self.manager.tmux.popup(cmd)
+
+    def action_invoke_skill(self, snaps: list[Snapshot], skill: str, prompt: str) -> None:
+        """Send a skill invocation to the selected agent (typed as a message,
+        so it works exactly like the user asking for it)."""
+        snap = self._current(snaps)
+        if snap is None:
+            return
+        skill_dir = self.manager.config.claude_home / "skills" / skill
+        if not (skill_dir / "SKILL.md").exists():
+            self.flash(f"missing skill: {skill_dir}", seconds=8)
+            return
+        if snap.status.status is Status.WORKING:
+            if not self.confirm(f"{snap.instance.name} is working — send anyway? y/N"):
+                return
+        try:
+            self.manager.send_text(snap.instance.name, prompt)
+            self.flash(f"asked {snap.instance.name} to run {skill}")
+        except (KeyError, TmuxError) as exc:
             self.flash(f"error: {exc}", seconds=8)
 
     def action_rename(self, snaps: list[Snapshot]) -> None:
@@ -404,6 +652,45 @@ class Sidebar:
                     h, w = self.scr.getmaxyx()
         finally:
             curses.curs_set(0)
+            self.scr.timeout(150)
+            self.draw()
+
+    def pick(self, title: str, options: list[tuple[str, str]]) -> str | None:
+        """Full-sidebar list picker: j/k move, Enter accepts, ESC/q cancels.
+        Returns the selected option's value."""
+        sel = 0
+        self.scr.timeout(-1)
+        try:
+            while True:
+                self.scr.erase()
+                _, w = self.scr.getmaxyx()
+                self._addstr(0, 0, f" {title} ".ljust(w), curses.A_BOLD | curses.A_REVERSE)
+                for i, (label, _) in enumerate(options):
+                    marker = "❯ " if i == sel else "  "
+                    attr = curses.A_BOLD if i == sel else self.attr["dim"]
+                    self._addstr(2 + i, 1, (marker + label)[: w - 2], attr)
+                self._addstr(3 + len(options), 1, "↵ open · ESC cancel", self.attr["dim"])
+                self.scr.refresh()
+                try:
+                    key = self.scr.get_wch()
+                except curses.error:
+                    continue
+                if isinstance(key, str):
+                    if key in ("\n", "\r"):
+                        return options[sel][1]
+                    if key in ("\x1b", "q"):
+                        return None
+                    if key == "j":
+                        sel = min(len(options) - 1, sel + 1)
+                    elif key == "k":
+                        sel = max(0, sel - 1)
+                    elif key.isdigit() and 0 < int(key) <= len(options):
+                        return options[int(key) - 1][1]
+                elif key == curses.KEY_DOWN:
+                    sel = min(len(options) - 1, sel + 1)
+                elif key == curses.KEY_UP:
+                    sel = max(0, sel - 1)
+        finally:
             self.scr.timeout(150)
             self.draw()
 

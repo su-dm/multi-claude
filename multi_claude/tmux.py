@@ -241,3 +241,17 @@ class Tmux:
 
     def detach_dashboard_clients(self) -> None:
         self._run("detach-client", "-s", f"={DASH_SESSION}", check=False)
+
+    def popup(self, shell_cmd: str, width: str = "85%", height: str = "85%") -> None:
+        """Run a command in a tmux popup over the dashboard (tmux >= 3.2).
+        -E closes the popup when the command exits. Fire-and-forget via Popen:
+        display-popup blocks its caller until the popup closes, and the
+        sidebar's event loop must not freeze while an editor is open."""
+        subprocess.Popen(
+            self.base_argv() + [
+                "display-popup", "-E", "-t", f"={DASH_SESSION}:{DASH_WINDOW}",
+                "-w", width, "-h", height, shell_cmd,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )

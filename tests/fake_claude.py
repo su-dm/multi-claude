@@ -9,7 +9,11 @@ a prompt box; echoes each line it receives and returns to the prompt.
 import sys
 import time
 
-BUSY_SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 2.0
+# First numeric arg = busy duration; claude-style flags (--continue,
+# --resume <id>) are accepted and ignored, like the real binary would.
+BUSY_SECONDS = next(
+    (float(a) for a in sys.argv[1:] if a.replace(".", "", 1).isdigit()), 2.0
+)
 
 
 def clear() -> None:

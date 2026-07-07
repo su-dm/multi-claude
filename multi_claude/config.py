@@ -6,9 +6,12 @@ tool at a throwaway socket/state directory without touching the real one.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +56,11 @@ class Config:
     )
     # Ring a bell / notify-send when an instance starts waiting on you.
     notify: bool = field(default_factory=lambda: _env("NOTIFY", "1") != "0")
+    # Claude Code's own data dir (transcripts live under <here>/projects/);
+    # overridable so tests can fabricate transcripts.
+    claude_home: Path = field(
+        default_factory=lambda: Path(_env("CLAUDE_HOME", os.path.expanduser("~/.claude")))
+    )
 
     @property
     def registry_path(self) -> Path:
@@ -62,12 +70,71 @@ class Config:
     def tmux_conf_path(self) -> Path:
         return self.data_dir / "tmux.conf"
 
+    @property
+    def costs_dir(self) -> Path:
+        """Per-session cost JSONs captured from Claude Code's statusline
+        hook (exact, CC-computed) — preferred over our pricing estimate."""
+        return self.data_dir / "costs"
+
     def resolve_claude_cmd(self) -> str | None:
         """Absolute path to the claude binary, or None if not found."""
         return shutil.which(os.path.expanduser(self.claude_cmd))
 
+    def claude_code_series(self) -> str:
+        """major.minor of the installed Claude Code ("2.1"), or "" if
+        unavailable. Cached — invoked once per process."""
+        if not hasattr(self, "_cc_series"):
+            series = ""
+            binary = self.resolve_claude_cmd()
+            if binary:
+                try:
+                    out = subprocess.run(
+                        [binary, "--version"], capture_output=True, text=True, timeout=10
+                    ).stdout
+                    m = re.match(r"(\d+\.\d+)", out.strip())
+                    series = m.group(1) if m else ""
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            object.__setattr__(self, "_cc_series", series)
+        return self._cc_series
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    # -- persisted user settings (data_dir/settings.json) --------------------
+
+    @property
+    def settings_path(self) -> Path:
+        return self.data_dir / "settings.json"
+
+    def apply_saved_settings(self) -> None:
+        """Load runtime-toggled settings (mtime-cached: cheap enough to call
+        from the poll loop, so CLI toggles reach a running sidebar). An
+        explicitly set env var wins (MULTI_CLAUDE_NOTIFY=0 always works)."""
+        try:
+            mtime = os.stat(self.settings_path).st_mtime_ns
+        except OSError:
+            return
+        if getattr(self, "_settings_mtime", None) == mtime:
+            return
+        object.__setattr__(self, "_settings_mtime", mtime)
+        try:
+            data = json.loads(self.settings_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if "MULTI_CLAUDE_NOTIFY" not in os.environ and "notify" in data:
+            self.notify = bool(data["notify"])
+
+    def save_setting(self, key: str, value) -> None:
+        self.ensure_dirs()
+        try:
+            data = json.loads(self.settings_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        data[key] = value
+        tmp = self.settings_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, self.settings_path)
 
     def mc_command(self) -> str:
         """Shell command that re-enters this CLI from tmux run-shell bindings.
@@ -81,8 +148,11 @@ class Config:
             f"{ENV_PREFIX}SOCKET": self.socket_name,
             f"{ENV_PREFIX}DATA_DIR": str(self.data_dir),
             f"{ENV_PREFIX}CLAUDE_CMD": self.claude_cmd,
+            f"{ENV_PREFIX}CLAUDE_HOME": str(self.claude_home),
             f"{ENV_PREFIX}POLL_INTERVAL": str(self.poll_interval),
-            f"{ENV_PREFIX}NOTIFY": "1" if self.notify else "0",
+            # NOTIFY is deliberately NOT pinned: it's runtime-toggled (N key /
+            # `notify on|off`) and persisted in data_dir/settings.json; an
+            # env pin here would freeze it for the sidebar process.
         }
         parts = (
             ["env", f"PYTHONPATH={shlex.quote(str(repo))}"]
@@ -125,6 +195,8 @@ bind-key -n M-z resize-pane -Z
 # Alt-1..9: display instance N; Alt-o: cycle to the next instance.
 {select_binds}
 bind-key -n M-o run-shell "{mc} select next"
+# Alt-a: jump to the next agent that needs your input.
+bind-key -n M-a run-shell "{mc} select attention"
 
 set -g status on
 set -g status-style "bg=colour236,fg=colour250"
