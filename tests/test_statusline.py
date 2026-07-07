@@ -47,6 +47,19 @@ class StatuslineTest(unittest.TestCase):
         self.assertIsNone(reported_cost(self.config, "nope"))
         self.assertIsNone(reported_cost(self.config, ""))
 
+    def test_traversal_session_id_writes_nothing(self):
+        # The session id becomes a filename; a crafted payload must not be
+        # able to escape costs_dir (or write there under a weird name).
+        for evil in ("../../escaped", "a/b", ".", "x" * 65, "a\nb"):
+            out = record_and_render(self.config, payload(session_id=evil))
+            self.assertIn("Sonnet 5", out)  # still renders a statusline
+        written = [
+            p for p in Path(self.tmp.name).rglob("*")
+            if p.is_file() and p.suffix in (".json", ".tmp")
+        ]
+        self.assertEqual(written, [])
+        self.assertEqual(list(Path(self.tmp.name).parent.glob("escaped.json")), [])
+
     def test_bad_payload_does_not_crash(self):
         out = record_and_render(self.config, "{not json")
         self.assertIn("bad statusline payload", out)

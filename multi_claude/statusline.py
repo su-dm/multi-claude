@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +39,11 @@ def record_and_render(config: Config, stdin_text: str) -> str:
     except json.JSONDecodeError:
         return "multi-claude: bad statusline payload"
     session_id = payload.get("session_id") or ""
+    # The id becomes a filename below — accept only Claude Code-style ids
+    # (UUID-ish) so a crafted payload can't traverse out of costs_dir
+    # ("../../x") and write files elsewhere.
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", session_id):
+        session_id = ""
     if session_id:
         config.costs_dir.mkdir(parents=True, exist_ok=True)
         target = config.costs_dir / f"{session_id}.json"

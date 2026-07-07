@@ -1,3 +1,5 @@
 JOURNAL.md
 ./build/*
 __pycache__
+# generated at runtime into the data dir; a committed copy leaks local paths
+tmux.conf

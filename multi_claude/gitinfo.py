@@ -129,10 +129,11 @@ def create_worktree(repo_dir: str, branch: str) -> str:
             return path
         raise GitError(f"{path} exists but is not a git worktree")
     branch_exists = _git(top, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
+    # "--" so a branch/path starting with "-" can't be parsed as a git flag.
     if branch_exists:
-        args = ["worktree", "add", path, branch]
+        args = ["worktree", "add", "--", path, branch]
     else:
-        args = ["worktree", "add", "-b", branch, path]
+        args = ["worktree", "add", "-b", branch, "--", path]
     proc = _git(top, *args, timeout=60)
     if proc.returncode != 0:
         raise GitError(proc.stderr.strip() or f"git worktree add failed for {branch}")

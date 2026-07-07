@@ -103,7 +103,8 @@ class Registry:
             self.instances = []
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             # Corrupt state file: preserve it for inspection, start fresh.
-            backup = self.path.with_suffix(".json.corrupt")
+            # Timestamped so a later corruption can't overwrite the evidence.
+            backup = self.path.with_suffix(f".json.corrupt.{int(time.time())}")
             try:
                 os.replace(self.path, backup)
             except OSError:

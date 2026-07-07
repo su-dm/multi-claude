@@ -182,8 +182,9 @@ class Tmux:
         self._run("respawn-pane", "-k", "-t", pane_id, shell_cmd, check=False)
 
     def send_text(self, pane_id: str, text: str) -> None:
-        """Type `text` into the pane followed by Enter. -l keeps it literal."""
-        self._run("send-keys", "-t", pane_id, "-l", text)
+        """Type `text` into the pane followed by Enter. -l keeps it literal;
+        "--" so text starting with "-" isn't parsed as a flag."""
+        self._run("send-keys", "-t", pane_id, "-l", "--", text)
         self._run("send-keys", "-t", pane_id, "Enter")
 
     def swap_panes(self, a: str, b: str) -> None:

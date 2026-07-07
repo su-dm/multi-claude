@@ -377,7 +377,9 @@ class Sidebar:
             elif key.isdigit() and key != "0":
                 if int(key) <= n:
                     self.selected = int(key) - 1
-                    self.action_display(self.manager.snapshots())
+                    # snaps, not a fresh non-archived fetch: with archived
+                    # shown, indices must match the list on screen.
+                    self.action_display(snaps)
             elif key in ("\n", "\r", "l", "o"):
                 self.action_display(snaps)
             elif key == "n":
@@ -531,7 +533,13 @@ class Sidebar:
         except (ValueError, TmuxError) as exc:
             self.flash(f"error: {exc}", seconds=8)
             return
-        self.selected = max(0, len(self.manager.registry.instances) - 1)
+        # Select the new instance where it actually appears (display order
+        # is pinned-first, so it isn't necessarily last).
+        order = self.manager.registry.ordered(self.show_archived)
+        self.selected = next(
+            (i for i, x in enumerate(order) if x.name == inst.name),
+            max(0, len(order) - 1),
+        )
         try:
             self.manager.display(inst.name, focus=False)
         except (KeyError, TmuxError):

@@ -61,6 +61,14 @@ class TmuxArgvTest(unittest.TestCase):
         else:
             self.assertNotIn("˙", conf)
 
+    def test_send_text_keeps_leading_dash_literal(self):
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            self.tmux.send_text("%1", "-N hello")
+        argvs = [c.args[0] for c in run.call_args_list]
+        literal = next(a for a in argvs if "-l" in a)
+        self.assertEqual(literal[-2:], ["--", "-N hello"])
+
     def test_spawn_instance_argv(self):
         with mock.patch("subprocess.run") as run:
             run.return_value = mock.Mock(returncode=0, stdout="%7\n", stderr="")

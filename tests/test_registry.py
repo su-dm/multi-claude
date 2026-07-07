@@ -62,7 +62,9 @@ class RegistryTest(unittest.TestCase):
         self.path.write_text("{not json")
         reg = self.make()
         self.assertEqual(reg.instances, [])
-        self.assertTrue(self.path.with_suffix(".json.corrupt").exists())
+        backups = list(self.path.parent.glob("*.json.corrupt.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), "{not json")
         reg.add(Instance(name="a", cwd="/tmp"))  # and it can save again
         self.assertEqual(json.loads(self.path.read_text())["instances"][0]["name"], "a")
 

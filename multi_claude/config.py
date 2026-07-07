@@ -104,7 +104,13 @@ class Config:
         return self._cc_series
 
     def ensure_dirs(self) -> None:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # 0700: instances.json records full launch command lines and costs/
+        # holds per-session spend — keep other local users out.
+        self.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(self.data_dir, 0o700)  # tighten pre-existing dirs too
+        except OSError:
+            pass
 
     # -- persisted user settings (data_dir/settings.json) --------------------
 
@@ -164,6 +170,15 @@ class Config:
             # `notify on|off`) and persisted in data_dir/settings.json; an
             # env pin here would freeze it for the sidebar process.
         }
+        # shlex.quote covers the shell layer, but render_tmux_conf embeds
+        # this command inside tmux double-quoted strings, where an embedded
+        # '"' would terminate the string and corrupt the conf — refuse it.
+        for value in [str(repo), sys.executable, *pinned.values()]:
+            if '"' in value:
+                raise ValueError(
+                    f"path/setting contains a double quote, which the "
+                    f"generated tmux conf cannot carry: {value!r}"
+                )
         parts = (
             ["env", f"PYTHONPATH={shlex.quote(str(repo))}"]
             + [f"{k}={shlex.quote(v)}" for k, v in pinned.items()]
