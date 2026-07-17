@@ -110,11 +110,13 @@ class ClassifyTest(unittest.TestCase):
         self.assertIs(classify(UNRECOGNIZED_FRAME, changed=True).status, Status.WORKING)
         self.assertIs(classify(UNRECOGNIZED_FRAME, changed=False).status, Status.IDLE)
 
-    def test_change_fallback_does_not_override_idle_box(self):
-        # The idle input box with changed=True (e.g. the user is typing a
-        # message themselves) — markers say idle only if no dialog/spinner,
-        # but a changing screen still counts as working to be safe.
-        self.assertIs(classify(IDLE_FRAME, changed=True).status, Status.WORKING)
+    def test_typing_at_idle_box_is_not_working(self):
+        # The idle input box with changed=True is the user typing a message
+        # themselves — their keystrokes redraw the screen, but that is not
+        # Claude working, and must not fire a notification when they pause.
+        self.assertIs(classify(IDLE_FRAME, changed=True).status, Status.IDLE)
+        typing = IDLE_FRAME.replace("│ >      ", "│ > fix t")
+        self.assertIs(classify(typing, changed=True).status, Status.IDLE)
 
     def test_old_spinner_in_scrollback_does_not_mark_working(self):
         # Marker appears far above the tail (stale frame); tail is a prompt.

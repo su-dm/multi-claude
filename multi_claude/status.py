@@ -14,9 +14,11 @@ when Claude Code's UI changes:
 1. Marker matching on the *visible* screen (never scrollback — it holds
    stale frames). Markers verified against Claude Code 2.1.x.
 2. Screen-change fallback: the caller passes `changed` (did the visible text
-   differ from the previous poll?). A changing screen with no dialog means
-   work is happening even if we don't recognize the spinner; a static,
-   unrecognized screen is treated as idle. This keeps the three states
+   differ from the previous poll?). A changing *unrecognized* screen means
+   work is happening even if we don't recognize the spinner; a static one is
+   treated as idle. The fallback never fires while the resting input box is
+   visible: the user typing their own message redraws the screen on every
+   keystroke, and that is not Claude working. This keeps the three states
    *approximately* right even if every marker string changes.
 
 This module is the only place that knows what Claude Code's UI looks like.
@@ -90,12 +92,15 @@ def classify(visible_text: str, pane_dead: bool = False, changed: bool = False) 
         return StatusInfo(Status.WORKING, _spinner_detail(tail_lines))
     if _HELP_CURSOR.search(tail) or any(m in tail_lower for m in _HELP_MARKERS):
         return StatusInfo(Status.HELP, _question_detail(tail_lines))
+    if any(m in tail for m in _IDLE_MARKERS):
+        # Input box with no spinner and no dialog: resting — or the user is
+        # typing, which redraws the screen every keystroke, so this must be
+        # decided before the screen-change fallback.
+        return StatusInfo(Status.IDLE)
     if changed:
         # Unrecognized but actively redrawing (streaming output, unknown
         # spinner style): it's doing something.
         return StatusInfo(Status.WORKING)
-    if any(m in tail for m in _IDLE_MARKERS):
-        return StatusInfo(Status.IDLE)
     # Static and unrecognized (a /help screen, a changed UI, a plain shell):
     # nothing is running and nothing asks for input — call it idle.
     return StatusInfo(Status.IDLE)

@@ -510,6 +510,9 @@ class InstanceManager:
                 prev in (Status.WORKING, Status.STARTING)
                 and now.wants_attention
                 and not inst.archived
+                # No ping for the pane the user is looking at right now
+                # (displayed in the viewer with a client attached).
+                and not (snap.displayed and self.tmux.dash_attached())
             ):
                 events.append((inst.name, now))
             self._prev_status[inst.name] = now

@@ -240,6 +240,12 @@ class Tmux:
     def dashboard_exists(self) -> bool:
         return self.has_session(DASH_SESSION)
 
+    def dash_attached(self) -> bool:
+        """Is any client attached to the dashboard session? No client means
+        nobody is watching, so attention events should still notify."""
+        proc = self._run("list-clients", "-t", f"={DASH_SESSION}", check=False)
+        return bool(proc.stdout.strip())
+
     def create_dashboard(self, sidebar_cmd: str, welcome_cmd: str) -> None:
         """Dashboard window: sidebar pane (left, fixed width) + viewer pane."""
         self.write_conf()
