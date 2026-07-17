@@ -133,6 +133,31 @@ class TranscriptTest(unittest.TestCase):
         path = make_session(self.pdir, "s1", 1000.0, [(1000, 0, 0, 1000), (1000, 0, 0, 1000)])
         self.assertAlmostEqual(session_cost(path), 0.036, places=6)
 
+    def test_session_cost_dedupes_multi_block_responses(self):
+        # Claude Code writes one JSONL line per content block; all lines of
+        # one API response carry the SAME message id + usage and must be
+        # counted once, not per line.
+        path = make_session(self.pdir, "s1", 1000.0, [])
+        line = json.loads(assistant_line(1100.0, 1000, 0, 0, 1000))
+        line["message"]["id"] = "msg_abc"
+        line["requestId"] = "req_1"
+        with open(path, "a") as fh:
+            fh.write(json.dumps(line) + "\n")
+            fh.write(json.dumps(line) + "\n")
+            fh.write(json.dumps(line) + "\n")
+        # One sonnet response: 1000*3/1M + 1000*15/1M = 0.018
+        self.assertAlmostEqual(session_cost(path), 0.018, places=6)
+
+    def test_session_cost_distinct_responses_still_sum(self):
+        path = make_session(self.pdir, "s1", 1000.0, [])
+        with open(path, "a") as fh:
+            for i in range(2):
+                line = json.loads(assistant_line(1100.0 + i, 1000, 0, 0, 1000))
+                line["message"]["id"] = f"msg_{i}"
+                line["requestId"] = f"req_{i}"
+                fh.write(json.dumps(line) + "\n")
+        self.assertAlmostEqual(session_cost(path), 0.036, places=6)
+
     def test_session_cost_unknown_model_is_skipped(self):
         path = make_session(self.pdir, "s1", 1000.0, [])
         with open(path, "a") as fh:

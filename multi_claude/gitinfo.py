@@ -113,14 +113,27 @@ def repo_toplevel(cwd: str) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+def main_checkout(cwd: str) -> str | None:
+    """Toplevel of the repo's MAIN working tree. From inside a linked
+    worktree this resolves back to the original checkout (the common git
+    dir's parent), so new worktrees always nest under <repo>.worktrees/
+    instead of <repo>.worktrees/<branch>.worktrees/."""
+    common = repo_identity(cwd)
+    if common and os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    return repo_toplevel(cwd)
+
+
 def create_worktree(repo_dir: str, branch: str) -> str:
     """Create (or reuse) a worktree for `branch`; returns its directory.
 
     New branches fork from the repo's current HEAD. If the branch already
     exists it is checked out as-is; if its worktree directory already exists
     it is reused (so re-spawning an agent on the same branch just works).
+    Callable from the main checkout OR any of its worktrees — the new
+    worktree always lands under the main checkout's .worktrees sibling.
     """
-    top = repo_toplevel(repo_dir)
+    top = main_checkout(repo_dir)
     if top is None:
         raise GitError(f"not a git repository: {repo_dir}")
     path = os.path.join(worktree_root(top), branch.replace("/", "-"))

@@ -286,6 +286,12 @@ class Tmux:
     def detach_dashboard_clients(self) -> None:
         self._run("detach-client", "-s", f"={DASH_SESSION}", check=False)
 
+    def kill_server(self) -> None:
+        """Tear down the ENTIRE multi-claude tmux server: every instance
+        pane (and its claude process), the work session, and the dashboard.
+        Nothing survives this."""
+        self._run("kill-server", check=False)
+
     def kill_dash_session(self) -> None:
         """Tear down the dashboard session (graceful quit). Callers must park
         any displayed instance pane back to WORK_SESSION first — panes still

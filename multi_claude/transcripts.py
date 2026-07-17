@@ -6,7 +6,8 @@ Claude Code writes one JSONL per session under
 - context tokens: input + cache_read + cache_creation + output of the LAST
   assistant message (verified against Claude Code 2.1.x);
 - model: `message.model` on the last assistant message;
-- approximate cumulative cost: summed per-message usage x a pricing table
+- approximate cumulative cost: summed per-API-response usage (deduped by
+  message id — one response spans several JSONL lines) x a pricing table
   (full-file scan, cached; marked approximate because pricing changes and
   cache-write TTL premiums are simplified);
 - activity: a one-line "what is it doing" — the latest thinking snippet,
@@ -216,10 +217,16 @@ def read_session_info(path: Path) -> SessionInfo:
 
 
 def session_cost(path: Path) -> float | None:
-    """Approximate cumulative cost: sum usage of every assistant message.
-    Full-file scan — call rarely (cached by TokenReader per mtime)."""
+    """Approximate cumulative cost: sum usage of every assistant API response.
+
+    Claude Code writes one JSONL "assistant" line per content block, and all
+    lines of one API response repeat the SAME message id and usage — summing
+    every line would double/triple-count (measured ~2-2.5x on real
+    transcripts). Dedupe on (message.id, requestId), counting each response
+    once. Full-file scan — call rarely (cached by TokenReader per mtime)."""
     total = 0.0
     found = False
+    seen: set[tuple[str, str]] = set()
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -232,6 +239,11 @@ def session_cost(path: Path) -> float | None:
                 if obj.get("type") != "assistant":
                     continue
                 msg = obj.get("message") or {}
+                key = (msg.get("id") or "", obj.get("requestId") or "")
+                if key != ("", ""):  # unidentifiable lines can't be deduped
+                    if key in seen:
+                        continue
+                    seen.add(key)
                 usage = msg.get("usage") or {}
                 rates = _pricing_for(msg.get("model") or "")
                 if rates is None:

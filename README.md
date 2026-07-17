@@ -77,12 +77,15 @@ default `C-b o` prefix always switches panes.
 | Sidebar | |
 | --- | --- |
 | `j k g G` / `Enter` | move / show + focus agent |
+| mouse | click an agent to open it; wheel moves the selection |
 | `v` | expanded view (model · cost · git · current thought) |
 | `n` | new agent — Tab completes dirs; offers worktree isolation in repos |
 | `p` / `d` / `A` | pin · archive (revivable) · show archived |
 | `N` | toggle notifications (persisted; also `multi-claude notify on\|off`) |
 | `R` / `C` | restart fresh / **resume conversation** |
 | `i` / `x` / `r` | send one line / kill / rename |
+| `X` | **kill everything** — all agents + the tmux server (confirms) |
+| `w` | retask agent onto a fresh worktree branch (new conversation) |
 | `c` / `S` / `H` | open claude configs · condense-to-skill · write HANDOFF.md |
 | `<` / `>` | narrow / widen the sidebar (persisted) |
 | `?` | full key reference (popup; `j`/`k` scroll, `q` closes) |
@@ -93,6 +96,9 @@ multi-claude new ~/code/api -w agent/fix-auth # spawn on an isolated worktree
 multi-claude ls                               # names, status, tokens, dirs
 multi-claude send api "run the tests"         # type into an agent
 multi-claude resume-all                       # after a reboot: continue all
+multi-claude retask api agent/next-task       # move agent to a new worktree
+multi-claude killall                          # kill ALL agents + tmux server
+                                              # (--keep leaves them resumable)
 multi-claude archive api && multi-claude unarchive api
 multi-claude uninstall-statusline             # remove the exact-cost hook
                                               # (install.sh wires it; costs

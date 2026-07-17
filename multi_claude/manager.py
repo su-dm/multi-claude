@@ -366,6 +366,62 @@ class InstanceManager:
         self._prev_screen.pop(inst.pane_id, None)
         self._tokens.forget(name)
 
+    def kill_all(self, purge: bool = True) -> int:
+        """Kill EVERYTHING: every agent process, the work session, the
+        dashboard, and the tmux server itself. purge=True also empties the
+        registry (nothing left to resume); purge=False keeps the metadata so
+        `multi-claude resume-all` can revive the conversations later.
+        Returns the number of instances that were registered.
+
+        May run from a process living inside the dashboard (sidebar X key),
+        which kill-server SIGHUPs — ignore that so teardown finishes."""
+        self.stop_polling()
+        try:
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        except (OSError, ValueError):
+            pass
+        self.registry.maybe_reload()
+        count = len(self.registry.instances)
+        self.tmux.kill_server()
+        if purge:
+            self.registry.instances = []
+        else:
+            for inst in self.registry.instances:
+                inst.pane_id = ""
+        self.registry.save()
+        with self._lock:
+            self._snapshots.clear()
+        self._prev_status.clear()
+        self._prev_screen.clear()
+        return count
+
+    def retask_worktree(self, name: str, branch: str) -> str:
+        """Repurpose an existing agent: move it onto a fresh worktree of its
+        repo for `branch` and relaunch claude there (a NEW conversation —
+        the old one stays resumable from the old directory via claude
+        --resume). Returns the new working directory."""
+        self.registry.maybe_reload()
+        inst = self.registry.get(name)
+        if inst is None:
+            raise KeyError(name)
+        try:
+            new_cwd = create_worktree(inst.cwd, branch.strip())
+        except GitError as exc:
+            raise ValueError(str(exc)) from exc
+        inst.cwd = new_cwd
+        inst.session_id = ""  # the old conversation belongs to the old cwd
+        command = list(inst.command) or [self.config.resolve_claude_cmd() or "claude"]
+        if inst.pane_id and self.tmux.pane_exists(inst.pane_id):
+            self.tmux.respawn_pane(inst.pane_id, new_cwd, command)
+        else:
+            inst.pane_id = self.tmux.spawn_instance(inst.name, new_cwd, command)
+        inst.started_at = time.time()
+        self.registry.save()
+        self._tokens.forget(name)
+        self._git = GitStatusCache()  # old cwd's cached status is stale
+        self.poll_once()
+        return new_cwd
+
     def archive(self, name: str) -> None:
         """Kill the agent's pane but keep it in the registry (hidden from the
         sidebar). Its conversation stays resumable via unarchive."""

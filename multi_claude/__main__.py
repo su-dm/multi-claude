@@ -59,6 +59,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_kill = sub.add_parser("kill", help="kill an instance")
     p_kill.add_argument("name")
 
+    p_killall = sub.add_parser(
+        "killall",
+        help="kill ALL agents and the tmux server (nothing keeps running)",
+    )
+    p_killall.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
+    )
+    p_killall.add_argument(
+        "--keep",
+        action="store_true",
+        help="keep instances in the registry so resume-all can revive them",
+    )
+
+    p_retask = sub.add_parser(
+        "retask",
+        help="move an agent onto a fresh git worktree branch of its repo "
+        "(starts a new conversation there)",
+    )
+    p_retask.add_argument("name")
+    p_retask.add_argument("branch")
+
     p_resume = sub.add_parser(
         "resume", help="relaunch an exited instance, continuing its conversation"
     )
@@ -269,6 +290,27 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "kill":
             manager.kill(args.name)
+            return 0
+        if args.cmd == "killall":
+            manager.registry.maybe_reload()
+            count = len(manager.registry.instances)
+            if count == 0 and not manager.tmux.list_sessions():
+                print("nothing running")
+                return 0
+            if not args.yes:
+                reply = input(
+                    f"kill {count} agent(s) and the whole tmux server? [y/N] "
+                ).strip().lower()
+                if reply != "y":
+                    print("aborted")
+                    return 1
+            manager.kill_all(purge=not args.keep)
+            kept = " (metadata kept: resume-all revives them)" if args.keep else ""
+            print(f"killed {count} agent(s) and the tmux server{kept}")
+            return 0
+        if args.cmd == "retask":
+            new_cwd = manager.retask_worktree(args.name, args.branch)
+            print(f"{args.name} now works in {new_cwd} (branch {args.branch})")
             return 0
         if args.cmd == "resume":
             manager.restart(args.name, resume=True)

@@ -34,6 +34,8 @@ _M = "⌥" if _MAC else "M-"
 HELP_LINES = [
     ("j / k", "move selection"),
     ("Enter / l", "show + focus instance"),
+    ("mouse", "click an agent to open it;"),
+    ("", "  wheel moves the selection"),
     ("1-9", "show instance N"),
     (f"{_M}h / {_M}l", "focus sidebar / claude"),
     (f"{_M}1..9, {_M}o", "switch from anywhere"),
@@ -59,6 +61,9 @@ HELP_LINES = [
     ("A", "show/hide archived"),
     ("N", "toggle notifications"),
     ("x", "kill instance (confirms)"),
+    ("X", "KILL ALL + tmux server (confirms)"),
+    ("w", "retask agent onto a fresh"),
+    ("", "  worktree branch (new convo)"),
     ("R", "restart exited (fresh)"),
     ("C", "resume exited (continue convo)"),
     ("r", "rename instance"),
@@ -118,6 +123,7 @@ class Sidebar:
         self.expanded = False
         self.show_archived = False
         self.help_top = 0
+        self.server_killed = False  # X pressed: leave the event loop
         self._init_colors()
 
     # -- colors ----------------------------------------------------------------
@@ -187,6 +193,7 @@ class Sidebar:
         try:
             curses.curs_set(0)
             self.scr.timeout(150)
+            self._enable_mouse()
             series = self.manager.config.claude_code_series()
             if series and series != CLAUDE_CODE_VERIFIED:
                 self.flash(
@@ -202,6 +209,11 @@ class Sidebar:
                 except curses.error:
                     continue  # timeout tick; loop redraws with fresh snapshots
                 self.handle_key(key)
+                if self.server_killed:
+                    # X killed the tmux server (our own pane included);
+                    # nothing left to draw on — exit without the graceful
+                    # shutdown path (there is no dashboard to tear down).
+                    return False
         except KeyboardInterrupt:
             # C-c anywhere in the sidebar (including inside prompt/pick/
             # confirm): graceful quit.
@@ -342,9 +354,85 @@ class Sidebar:
         hint = f"j/k scroll ({more} more) · any key closes" if more > 0 else "any key closes"
         self._addstr(h - 1, 0, f" {hint}"[: w - 1], self.attr["accent"])
 
+    # -- mouse ---------------------------------------------------------------------
+
+    def _enable_mouse(self) -> None:
+        """Ask curses for click + wheel events (tmux already runs with
+        `mouse on`, so clicks reach this pane). Wheel-down is BUTTON5 only
+        on newer ncurses ABIs — degrade silently where it's missing."""
+        mask = (
+            curses.BUTTON1_CLICKED
+            | curses.BUTTON1_DOUBLE_CLICKED
+            | curses.BUTTON1_RELEASED
+            | curses.BUTTON4_PRESSED
+            | getattr(curses, "BUTTON5_PRESSED", 0)
+        )
+        try:
+            curses.mousemask(mask)
+        except curses.error:
+            pass  # terminal without mouse support; keys still work
+
+    @staticmethod
+    def _drain_mouse() -> tuple[int, int, int] | None:
+        """Pop the pending mouse event -> (x, y, bstate). Always call on
+        KEY_MOUSE, even to ignore a click, or a stale event stays queued."""
+        try:
+            _, x, y, _, bstate = curses.getmouse()
+            return x, y, bstate
+        except curses.error:
+            return None
+
+    def _item_at(self, y: int) -> int | None:
+        """Instance index under screen row y, or None outside the list
+        (header row 0, footer, or past the last visible item)."""
+        if y < 1:
+            return None
+        h, w = self.scr.getmaxyx()
+        footer, _ = self._footer_lines(w)
+        rows_per = self._rows_per_item()
+        visible = max(1, (h - 1 - len(footer)) // rows_per)
+        row = (y - 1) // rows_per
+        if row >= visible:
+            return None
+        return self.top + row
+
+    def _on_mouse(self) -> None:
+        event = self._drain_mouse()
+        if event is None:
+            return
+        _, y, bstate = event
+        if self.show_help:
+            self.show_help = False
+            self.help_top = 0
+            return
+        snaps = self.manager.snapshots(include_archived=self.show_archived)
+        wheel_down = getattr(curses, "BUTTON5_PRESSED", 0)
+        if bstate & curses.BUTTON4_PRESSED:  # wheel up
+            self.selected = max(0, self.selected - 1)
+            return
+        if wheel_down and bstate & wheel_down:
+            self.selected = min(len(snaps) - 1, self.selected + 1) if snaps else 0
+            return
+        # A click is reported as CLICKED when ncurses composes press+release,
+        # or as a bare RELEASED when it doesn't — never both for one click.
+        if not bstate & (
+            curses.BUTTON1_CLICKED
+            | curses.BUTTON1_DOUBLE_CLICKED
+            | curses.BUTTON1_RELEASED
+        ):
+            return
+        idx = self._item_at(y)
+        if idx is None or idx >= len(snaps):
+            return
+        self.selected = idx
+        self.action_display(snaps)
+
     # -- key handling --------------------------------------------------------------
 
     def handle_key(self, key) -> None:
+        if key == curses.KEY_MOUSE:
+            self._on_mouse()
+            return
         if self.show_help:
             if key in ("j", curses.KEY_DOWN):
                 self.help_top += 1
@@ -388,6 +476,10 @@ class Sidebar:
                 self.action_send(snaps)
             elif key == "x":
                 self.action_kill(snaps)
+            elif key == "X":
+                self.action_kill_all()
+            elif key == "w":
+                self.action_retask(snaps)
             elif key == "R":
                 self.action_restart(snaps, resume=False)
             elif key == "C":
@@ -573,6 +665,39 @@ class Sidebar:
         self.flash(f"killed {snap.instance.name}")
         self.selected = max(0, self.selected - 1)
 
+    def action_kill_all(self) -> None:
+        """X: kill every agent AND the tmux server — nothing keeps running.
+        This also takes down the dashboard (and this very sidebar)."""
+        count = len(self.manager.registry.ordered(include_archived=True))
+        if not self.confirm(
+            f"KILL ALL: {count} agent(s) + tmux server — nothing survives. y/N"
+        ):
+            return
+        self.manager.kill_all()
+        self.server_killed = True
+
+    def action_retask(self, snaps: list[Snapshot]) -> None:
+        """w: repurpose the selected agent onto a fresh worktree branch of
+        its repo (relaunches claude there with a new conversation)."""
+        snap = self._current(snaps)
+        if snap is None:
+            return
+        if not self.manager.is_git_dir(snap.instance.cwd):
+            self.flash("not a git repo — no worktrees here")
+            return
+        if snap.status.status is Status.WORKING:
+            if not self.confirm(f"{snap.instance.name} is working — retask anyway? y/N"):
+                return
+        branch = self.prompt("new worktree branch", initial="agent/")
+        if branch is None or not branch.strip():
+            return
+        try:
+            new_cwd = self.manager.retask_worktree(snap.instance.name, branch.strip())
+        except (KeyError, ValueError, TmuxError) as exc:
+            self.flash(f"error: {exc}", seconds=8)
+            return
+        self.flash(f"{snap.instance.name} → {_abbrev_path(new_cwd)} (new conversation)")
+
     def action_restart(self, snaps: list[Snapshot], resume: bool = False) -> None:
         snap = self._current(snaps)
         if snap is None:
@@ -752,6 +877,8 @@ class Sidebar:
                     if buf:
                         buf.pop()
                     hint = ""
+                elif key == curses.KEY_MOUSE:
+                    self._drain_mouse()  # clicks don't edit; keep queue clean
                 elif key == curses.KEY_RESIZE:
                     self._enforce_width()
                     h, w = self.scr.getmaxyx()
@@ -804,6 +931,8 @@ class Sidebar:
                     sel = min(len(options) - 1, sel + 1)
                 elif key == curses.KEY_UP:
                     sel = max(0, sel - 1)
+                elif key == curses.KEY_MOUSE:
+                    self._drain_mouse()  # clicks don't pick; keep queue clean
         finally:
             self.scr.timeout(150)
             self.draw()
@@ -825,6 +954,9 @@ class Sidebar:
                     continue
                 if isinstance(key, str):
                     return key.lower() == "y"
+                if key == curses.KEY_MOUSE:
+                    self._drain_mouse()  # a stray click must not answer y/N
+                    continue
                 if key == curses.KEY_RESIZE:
                     continue
                 return False
@@ -883,6 +1015,9 @@ def run_sidebar(manager: InstanceManager) -> None:
         # C-c in the slivers outside Sidebar.run's own handler (curses
         # setup/teardown): same graceful quit.
         quit_all = True
+    except curses.error:
+        # Terminal gone mid-teardown (X killed the tmux server under us).
+        quit_all = False
     if quit_all:
         # Tear the dashboard down AFTER curses restored the terminal.
         manager.shutdown_dashboard()

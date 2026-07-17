@@ -70,6 +70,15 @@ class GitInfoTest(unittest.TestCase):
         path = create_worktree(sub, "agent/y")
         self.assertTrue(path.startswith(worktree_root(self.repo)))
 
+    def test_worktree_from_worktree_targets_main_checkout(self):
+        # Retasking/spawning from inside an agent's worktree must land the
+        # new worktree under <repo>.worktrees/, never nest a
+        # <branch>.worktrees/ inside the first worktree.
+        first = create_worktree(self.repo, "agent/one")
+        second = create_worktree(first, "agent/two")
+        self.assertTrue(second.startswith(worktree_root(self.repo)))
+        self.assertEqual(read_status(second).branch, "agent/two")
+
     def test_worktree_existing_branch(self):
         git(self.repo, "branch", "feature-old")
         path = create_worktree(self.repo, "feature-old")
