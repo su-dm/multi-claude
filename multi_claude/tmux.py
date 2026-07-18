@@ -43,6 +43,9 @@ class Pane:
     window_name: str
     dead: bool
     start_command: str
+    # cwd of the pane's root process; identifies which instance a pane
+    # really belongs to when tmux recycles pane ids across server restarts.
+    current_path: str = ""
 
 
 class Tmux:
@@ -92,17 +95,19 @@ class Tmux:
             "-a",
             "-F",
             "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_name}\t"
-            "#{pane_dead}\t#{pane_start_command}",
+            "#{pane_dead}\t#{pane_current_path}\t#{pane_start_command}",
             check=False,
         )
         if proc.returncode != 0:
             return []
         panes = []
         for line in proc.stdout.splitlines():
-            fields = (line.split("\t", 5) + [""] * 6)[:6]
-            pane_id, session, window_id, window_name, dead, start = fields
+            fields = (line.split("\t", 6) + [""] * 7)[:7]
+            pane_id, session, window_id, window_name, dead, path, start = fields
             if pane_id:
-                panes.append(Pane(pane_id, session, window_id, window_name, dead == "1", start))
+                panes.append(
+                    Pane(pane_id, session, window_id, window_name, dead == "1", start, path)
+                )
         return panes
 
     def pane_exists(self, pane_id: str) -> bool:

@@ -54,6 +54,43 @@ Some completely redesigned future UI
 with no strings we know about.
 """
 
+# -- current 2.1.x chrome (verified against 2.1.212, vim mode on) -----------
+# The spinner dropped the "esc to interrupt" hint, and the bordered "│ >"
+# input box became a bare "❯ " prompt between horizontal rules with a
+# mode-dependent hint line. The input box stays visible WHILE working
+# (messages can be queued), so idle can only mean "box and no spinner".
+
+CURRENT_WORKING_FRAME = """\
+● The dashboard is live. Let me capture the panes.
+
+✻ Hashing… (4m 53s · ↓ 13.0k tokens)
+  ⎿  Tip: Run /install-github-app to tag @claude right from your Github issues
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+  Fable 5 · $2.65
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+"""
+
+CURRENT_THINKING_FRAME = """\
+* Scaffolding project… (thinking with medium effort)
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)
+"""
+
+CURRENT_IDLE_FRAME = """\
+● Done! The refactor is complete and all tests pass.
+
+✻ Churned for 10m 55s
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+  Fable 5 · $15.20
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+"""
+
 # The transcript prefixes past USER messages with the same "❯" glyph dialogs
 # use for their cursor — a resting session showing history must be idle.
 TRANSCRIPT_FRAME = """\
@@ -117,6 +154,33 @@ class ClassifyTest(unittest.TestCase):
         self.assertIs(classify(IDLE_FRAME, changed=True).status, Status.IDLE)
         typing = IDLE_FRAME.replace("│ >      ", "│ > fix t")
         self.assertIs(classify(typing, changed=True).status, Status.IDLE)
+
+    def test_current_working_spinner(self):
+        # No "esc to interrupt" hint and the prompt box is visible while
+        # working — the spinner line alone must win, even on a static poll.
+        info = classify(CURRENT_WORKING_FRAME, changed=False)
+        self.assertIs(info.status, Status.WORKING)
+        self.assertIn("Hashing", info.detail)
+
+    def test_current_thinking_spinner(self):
+        # Extended thinking can hold the screen static for a while; the
+        # spinner marker must carry it, not the change fallback.
+        info = classify(CURRENT_THINKING_FRAME, changed=False)
+        self.assertIs(info.status, Status.WORKING)
+        self.assertIn("Scaffolding project", info.detail)
+
+    def test_current_idle_prompt(self):
+        # The finished-work summary line ("✻ Churned for 10m 55s") has no
+        # "…(" and must NOT read as a spinner.
+        self.assertIs(classify(CURRENT_IDLE_FRAME).status, Status.IDLE)
+        # ... and typing into the new prompt redraws the screen: still idle.
+        self.assertIs(classify(CURRENT_IDLE_FRAME, changed=True).status, Status.IDLE)
+
+    def test_quoted_spinner_in_message_body_is_not_working(self):
+        # Claude Code indents message/tool content two spaces; a quoted
+        # spinner line (e.g. from a pasted capture) must not read as working.
+        quoted = "  ✻ Hashing… (46s · ↓ 2.2k tokens)\n" + CURRENT_IDLE_FRAME
+        self.assertIs(classify(quoted).status, Status.IDLE)
 
     def test_old_spinner_in_scrollback_does_not_mark_working(self):
         # Marker appears far above the tail (stale frame); tail is a prompt.

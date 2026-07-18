@@ -62,6 +62,53 @@ def _is_instance_pane(pane: Pane) -> bool:
     return True
 
 
+def resolve_pane_claims(instances, panes: dict[str, Pane]) -> bool:
+    """Drop stale pane_id claims from the registry.
+
+    tmux pane ids ("%N") are only unique within one server lifetime; after a
+    reboot the numbering restarts and an old registry entry can end up
+    pointing at a pane that now belongs to a *different* instance (or to our
+    own furniture). The phantom claimant then mirrors someone else's screen —
+    including its status transitions, i.e. bogus notifications.
+
+    Rules (conservative — a wrongly cleared claim shows a live agent as
+    EXITED, which is worse than a stale one):
+    - a claim on a furniture pane (sidebar/welcome/keep-alive) is stale;
+    - when several instances claim the same live pane, the best match keeps
+      it (pane cwd == instance cwd, then window name == instance name, then
+      most recently started) and the rest are cleared.
+    Single claims on instance-looking panes are trusted. Returns True if any
+    claim was cleared (caller saves the registry).
+    """
+    claims: dict[str, list] = {}
+    for inst in instances:
+        if inst.pane_id and inst.pane_id in panes:
+            claims.setdefault(inst.pane_id, []).append(inst)
+    changed = False
+    for pane_id, claimants in claims.items():
+        pane = panes[pane_id]
+        if not _is_instance_pane(pane):
+            for inst in claimants:
+                inst.pane_id = ""
+                changed = True
+            continue
+        if len(claimants) == 1:
+            continue
+        def _score(inst):
+            same_cwd = os.path.realpath(pane.current_path or "/nonexistent") == \
+                os.path.realpath(inst.cwd)
+            return (
+                2 * same_cwd + (pane.window_name == inst.name),
+                inst.started_at or inst.created_at,
+            )
+        winner = max(claimants, key=_score)
+        for inst in claimants:
+            if inst is not winner:
+                inst.pane_id = ""  # its real pane died with an old server
+                changed = True
+    return changed
+
+
 class InstanceManager:
     def __init__(self, config: Config):
         self.config = config
@@ -75,6 +122,9 @@ class InstanceManager:
         self._poll_thread: threading.Thread | None = None
         self._prev_status: dict[str, Status] = {}
         self._prev_screen: dict[str, int] = {}  # pane_id -> hash of last capture
+        # name -> consecutive polls spent WORKING; a WORKING→IDLE ping needs a
+        # real work streak behind it, not a one-frame redraw blip.
+        self._working_streak: dict[str, int] = {}
         self._tokens = TokenReader(config.claude_home)
         self._git = GitStatusCache()
         self.attention_events: list[tuple[str, Status]] = []
@@ -363,6 +413,7 @@ class InstanceManager:
         with self._lock:
             self._snapshots.pop(name, None)
         self._prev_status.pop(name, None)
+        self._working_streak.pop(name, None)
         self._prev_screen.pop(inst.pane_id, None)
         self._tokens.forget(name)
 
@@ -393,6 +444,7 @@ class InstanceManager:
             self._snapshots.clear()
         self._prev_status.clear()
         self._prev_screen.clear()
+        self._working_streak.clear()
         return count
 
     def retask_worktree(self, name: str, branch: str) -> str:
@@ -506,6 +558,7 @@ class InstanceManager:
             if snap:
                 self._snapshots[new] = snap
         self._prev_status.pop(old, None)
+        self._working_streak.pop(old, None)
         return new
 
     def send_text(self, name: str, text: str) -> None:
@@ -523,6 +576,8 @@ class InstanceManager:
         self.config.apply_saved_settings()
         self.registry.maybe_reload()
         panes = {p.pane_id: p for p in self.tmux.list_panes()}
+        if resolve_pane_claims(self.registry.instances, panes):
+            self.registry.save()
         self._adopt_strays(panes)
         displayed = self.displayed_pane_id()
         events: list[tuple[str, Status]] = []
@@ -566,12 +621,25 @@ class InstanceManager:
                 prev in (Status.WORKING, Status.STARTING)
                 and now.wants_attention
                 and not inst.archived
+                # An IDLE ping means "your agent finished" — require a real
+                # work streak first. One poll of WORKING is usually a redraw
+                # blip (screen-change fallback), not finished work. HELP and
+                # EXITED are marker/pane-death based, so they stay immediate.
+                and not (
+                    now is Status.IDLE
+                    and prev is Status.WORKING
+                    and self._working_streak.get(inst.name, 0) < 2
+                )
                 # No ping for the pane the user is looking at right now
                 # (displayed in the viewer with a client attached).
                 and not (snap.displayed and self.tmux.dash_attached())
             ):
                 events.append((inst.name, now))
             self._prev_status[inst.name] = now
+            if now is Status.WORKING:
+                self._working_streak[inst.name] = self._working_streak.get(inst.name, 0) + 1
+            else:
+                self._working_streak.pop(inst.name, None)
             snapshots[inst.name] = snap
         with self._lock:
             self._snapshots = snapshots

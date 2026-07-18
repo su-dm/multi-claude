@@ -52,7 +52,17 @@ class StatusInfo:
     detail: str = ""
 
 
-_WORKING_MARKER = "esc to interrupt"  # spinner line, present whenever busy
+_WORKING_MARKER = "esc to interrupt"  # spinner hint (early 2.1.x)
+
+# Current 2.1.x spinner line, at column 0, e.g.:
+#   ✻ Hashing… (4m 53s · ↓ 13.0k tokens)
+#   * Scaffolding project… (thinking with medium effort)
+# The glyph animates through several frames; the stable shape is
+# glyph + verb ending in "…" + parenthesized status. The finished summary
+# ("✻ Churned for 10m 55s") has no "…(" and must NOT read as working.
+# Column 0 matters: Claude Code indents message/tool content by two spaces,
+# so quoted spinner-lookalikes inside the transcript never start a line.
+_SPINNER_RE = re.compile(r"^[✻✽✶✳✢·∗*+]\s?\S[^\n]*(?:…|\.\.\.)\s*\(", re.MULTILINE)
 
 # A selectable option list draws a "❯" cursor before the highlighted entry,
 # NUMBERED in permission/trust/plan/question dialogs. The number is required:
@@ -66,8 +76,23 @@ _HELP_MARKERS = (
     "would you like",
 )
 
-# Resting input box.
-_IDLE_MARKERS = ("│ >", "? for shortcuts")
+# Resting input box. Early 2.1.x drew a bordered box ("│ >") with a
+# "? for shortcuts" hint; current 2.1.x draws a bare "❯ " prompt between
+# horizontal rules, and the hint line varies with vim mode ("-- INSERT --")
+# and permission mode ("⏵⏵ auto mode on (shift+tab to cycle)").
+# NOTE: the box stays visible WHILE Claude works (messages can be queued),
+# so these markers only mean idle because the spinner check runs first.
+_IDLE_MARKERS = (
+    "│ >",
+    "? for shortcuts",
+    "-- INSERT --",
+    "-- NORMAL --",
+    "shift+tab to cycle",
+)
+# The prompt line itself: "❯" at column 0 followed by whitespace (the input
+# box pads with U+00A0) or end-of-line. Dialog cursors ("❯ 1. Yes") also
+# match, but HELP is checked first.
+_PROMPT_RE = re.compile(r"^❯(\s|$)", re.MULTILINE)
 
 
 def classify(visible_text: str, pane_dead: bool = False, changed: bool = False) -> StatusInfo:
@@ -88,11 +113,11 @@ def classify(visible_text: str, pane_dead: bool = False, changed: bool = False) 
     tail = "\n".join(tail_lines)
     tail_lower = tail.lower()
 
-    if _WORKING_MARKER in tail_lower:
+    if _WORKING_MARKER in tail_lower or _SPINNER_RE.search(tail):
         return StatusInfo(Status.WORKING, _spinner_detail(tail_lines))
     if _HELP_CURSOR.search(tail) or any(m in tail_lower for m in _HELP_MARKERS):
         return StatusInfo(Status.HELP, _question_detail(tail_lines))
-    if any(m in tail for m in _IDLE_MARKERS):
+    if any(m in tail for m in _IDLE_MARKERS) or _PROMPT_RE.search(tail):
         # Input box with no spinner and no dialog: resting — or the user is
         # typing, which redraws the screen every keystroke, so this must be
         # decided before the screen-change fallback.
@@ -109,7 +134,7 @@ def classify(visible_text: str, pane_dead: bool = False, changed: bool = False) 
 def _spinner_detail(tail_lines: list[str]) -> str:
     """Extract e.g. 'Refactoring…' from the spinner line."""
     for line in reversed(tail_lines):
-        if _WORKING_MARKER in line.lower():
+        if _WORKING_MARKER in line.lower() or _SPINNER_RE.match(line):
             head = line.split("(")[0].strip()
             parts = head.split(None, 1)  # drop the spinner glyph
             if len(parts) == 2 and len(parts[0]) <= 2:
